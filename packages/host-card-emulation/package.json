@@ -8,6 +8,8 @@
     "js",
     "android",
     "ios",
+    "plugin",
+    "app.plugin.js",
     "RTNHCEModuleIOS.podspec",
     "!android/build",
     "!ios/build",
@@ -30,7 +32,8 @@
   "homepage": "https://github.com/icedevml/react-native-host-card-emulation#readme",
   "peerDependencies": {
     "react": "*",
-    "react-native": "*"
+    "react-native": "*",
+    "@expo/config-plugins": "*"
   },
   "codegenConfig": {
     "name": "RTNHCEModuleSpec",
@@ -44,5 +47,11 @@
         "NativeHCEModule": "RTNHCEModuleIOS"
       }
     }
+  },
+  "devDependencies": {
+    "@expo/config-plugins": "^54.0.2"
+  },
+  "expo": {
+    "plugin": "./app.plugin.js"
   }
 }
