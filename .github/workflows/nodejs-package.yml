@@ -11,12 +11,12 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-      - run: npm install -g corepack@0.34.0
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - run: npm install -g corepack@0.34.5
       - run: corepack enable
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
         with:
-          node-version: 22
+          node-version: 24
       - run: |
           cd packages/host-card-emulation
           yarn
@@ -33,46 +33,13 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-      - run: npm install -g corepack@0.34.0
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - run: npm install -g corepack@0.34.5
       - run: corepack enable
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
         with:
-          node-version: 22
+          node-version: 24
       - run: yarn
-      - run: |
-          yarn config set npmRegistryServer "https://registry.npmjs.org"
-          yarn config set npmAlwaysAuth "true"
-          yarn config set npmAuthToken "$NODE_AUTH_TOKEN"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: |
-          cd packages/host-card-emulation
-          yarn npm publish --provenance --access public
-
-  publish-gpr:
-    if: github.event.release
-    needs: build
-    runs-on: ubuntu-24.04
-    environment: production
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-      - run: npm install -g corepack@0.34.0
-      - run: corepack enable
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
-        with:
-          node-version: 22
-      - run: yarn
-      - run: |
-          yarn config set npmRegistryServer "https://npm.pkg.github.com"
-          yarn config set npmAlwaysAuth "true"
-          yarn config set npmAuthToken "$NODE_AUTH_TOKEN"
-        env:
-          NODE_AUTH_TOKEN: ${{ github.token }}
       - run: |
           cd packages/host-card-emulation
           yarn npm publish --provenance --access public
