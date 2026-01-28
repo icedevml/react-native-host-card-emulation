@@ -37,6 +37,7 @@ public class HCEService extends HostApduService implements HCEServiceCallback {
     private static final String TAG = "HCEService";
 
     private boolean isForeground;
+    private volatile boolean isDeactivated;
     private String backgroundSessionUUID;
     private RTNHCEAndroidModule hceModule;
     private byte[] pendingCAPDU;
@@ -118,6 +119,7 @@ public class HCEService extends HostApduService implements HCEServiceCallback {
         HeadlessJsTaskContext headlessJsTaskContext = Companion.getInstance(reactContext);
         headlessJsTaskContext.finishTask(taskId);
         taskSessionIdMap.remove(handle);
+        stopSelf();
     }
 
     @Override
@@ -144,6 +146,11 @@ public class HCEService extends HostApduService implements HCEServiceCallback {
     @Override
     public byte[] processCommandApdu(byte[] command, Bundle extras) {
         Log.d(TAG, "HCEService:processCommandApdu");
+
+        if (isDeactivated) {
+            onCreate();
+        }
+
         String capdu = BinaryUtils.ByteArrayToHexString(command).toUpperCase(Locale.ROOT);
 
         if (isForeground) {
@@ -181,6 +188,7 @@ public class HCEService extends HostApduService implements HCEServiceCallback {
         }
 
         isForeground = isAppOnForeground(getApplicationContext());
+        isDeactivated = false;
         pendingCAPDU = null;
         hceModule = null;
         needsResponse = false;
@@ -242,6 +250,7 @@ public class HCEService extends HostApduService implements HCEServiceCallback {
     public void onDeactivated(int reason) {
         Log.d(TAG, "HCEService:onDeactivated: " + reason);
         needsResponse = false;
+        isDeactivated = true;
 
         if (isForeground) {
             if (this.hceModule != null && this.hceModule.isHCEActiveConnection()) {
