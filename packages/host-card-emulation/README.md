@@ -63,6 +63,9 @@ Afterwards, follow the subsections below for each platform that you need to supp
    Replace `F001020304`, `F00102030405`, `F0010203040506` with the ISO7816 AIDs that you want to support.
 3. In the `ios/` app's subdirectory, run `bundle install && bundle exec pod install`.
 
+   Alternatively, with React Native 0.87+ you can use the experimental Swift Package Manager integration instead of
+   CocoaPods - the package ships a `Package.swift` manifest for React Native's SwiftPM autolinking.
+
 ### Android
 1. In `android/app/src/main/AndroidManifest.xml` add:
    ```diff
@@ -115,202 +118,216 @@ Afterwards, follow the subsections below for each platform that you need to supp
    Replace `F001020304`, `F00102030405`, `F0010203040506` with the ISO7816 AIDs that you want to support.
 
    Keep `android:requireDeviceUnlock` set to `false` in any scenario, this is the way to avoid having system prompts
-   displayed by Android whenever the app is interacted with when the phone is locked. On the JavaScript/TypeScript side,
-   you will receive `deviceLocked`/`deviceUnlocked` events that will let you decide whether you want to allow the NFC
-   interaction or not.
+   displayed by Android whenever the app is interacted with when the phone is locked. Every C-APDU delivered to your
+   handler carries the `deviceLocked` flag, which lets you decide whether you want to allow the NFC interaction or not.
 
    For `android:requireDeviceScreenOn` - set it according to your use case.
 
-## API Specification & Demo App
-
-This module provides a uniform low-level HCE API for both mobile platforms.
+## API
 
 > [!NOTE]
-> Raw native module's API specification is available in [packages/host-card-emulation/js](https://github.com/icedevml/react-native-host-card-emulation/tree/master/packages/host-card-emulation/js) subdirectory.
-> Check it out in order to understand what methods you can call against the module and what are the expected parameters/return values.
+> Version 1.0 introduced a new API, which is not compatible with 0.x versions. See [Migrating from 0.x](#migrating-from-0x).
 
-> [!NOTE]
-> See [Source Code for Demo Application: NDEF NFC Type 4 Tag Emulator (for iOS/Android)](https://github.com/icedevml/react-native-host-card-emulation/tree/master/packages/demo-ndef-app) example for more insights about the library's API.
+```typescript
+import HCE from '@icedevml/react-native-host-card-emulation';
+```
+
+The library guarantees that **every C-APDU is responded to exactly once**: your handler returns the R-APDU and the library
+sends it. If the handler throws an exception or returns an invalid response, the reader receives the `6F00` status word
+(no precise diagnosis). Responses are bound to the C-APDU they were produced for, so a late response can never be sent
+as a reply to a different command.
+
+All the handlers of a given session are called sequentially - the next event is never delivered before the handler
+of the previous one has finished (including the returned promise).
+
+See [Source Code for Demo Application: NDEF NFC Type 4 Tag Emulator (for iOS/Android)](https://github.com/icedevml/react-native-host-card-emulation/tree/master/packages/demo-ndef-app) for a complete example.
+
+### Checking device capabilities
+
+```typescript
+const caps = await HCE.getCapabilities();
+// {
+//   platform: 'android' | 'ios',
+//   hceSupported: boolean,         // device & OS support HCE at all
+//   nfcEnabled: boolean,           // NFC is turned on (Android) / available (iOS)
+//   eligible: boolean,             // iOS: CardSession.isEligible (region, entitlement); Android: same as hceSupported
+//   backgroundSupported: boolean,  // registerBackgroundHandler() is supported (Android)
+//   presentmentSupported: boolean, // acquireExclusiveNFC() is supported (iOS)
+// }
+```
 
 ### Quick start guide
 
-1. Subscribe to the event stream. There is a single global event stream, so you can subscribe early and remain subscribed to events for the entire application's lifetime.
+1. When the user indicates that they want to perform the HCE action, begin the session and start the emulation:
+   ```typescript
+   const session = await HCE.beginSession({
+       // required: return the R-APDU (including the status word) for the given C-APDU
+       onApdu: async (apdu) => {
+           // apdu.command: Uint8Array, apdu.deviceLocked: boolean
+           // for the demo purposes, we always respond with [0x0A] + status code 0x9000 (success)
+           return new Uint8Array([0x0A, 0x90, 0x00]);
+       },
+       onReaderDetected: () => session.setAlertMessage('Reader detected'),  // only for iOS, no-op on Android
+       onReaderLost: () => session.setAlertMessage('Lost reader'),          // only for iOS, no-op on Android
+       onInvalidated: (reason) => console.log('session closed', reason),
+       onError: (error) => console.warn('HCE handler error', error),
+   });
+
+   session.setAlertMessage('Tap towards the reader');  // only for iOS, no-op on Android
+   await session.startEmulation();
+   ```
+   `beginSession()` resolves once the session is started and ready for `startEmulation()`. Only a single session can be
+   active at a time, `beginSession()` rejects with `err_session_exists` otherwise.
+
+   Calling `await session.startEmulation()` causes:
+   * iOS: Your smartphone will start listening for C-APDUs (Command APDUs originating from reader devices) right after that function is called, which will be additionally indicated by the operating system popping out the NFC scanning user interface prompt.
+   * Android: C-APDUs will be forwarded to this session from that point on. No specific user interface is displayed (you have to implement it on your own, within your app).
+
+2. Close the session whenever you don't need it anymore:
+   ```typescript
+   await session.stopEmulation('success');  // iOS: 'success' / 'failure' UI status; Android: status is ignored
+   session.invalidate();                   // idempotent
+   ```
+   `session.closed` is a promise that resolves with the reason once the session is closed (by you or by the OS).
+
+3. Within React components, pass an `AbortSignal`, so the session is always closed when the component is unmounted -
+   even if it's still being started at that time:
    ```typescript
    useEffect(() => {
-       const subscription = NativeHCEModule.onEvent(async (event: HCEModuleEvent) => {
-           switch (event.type) {
-               /* ... implement event handlers here ... */
+       const controller = new AbortController();
+
+       (async () => {
+           const session = await HCE.beginSession({ onApdu }, { signal: controller.signal });
+           await session.startEmulation();
+       })().catch((e) => {
+           if (!controller.signal.aborted) {
+               console.error(e);
            }
        });
 
-       // cleanup the event listener when the effect is unmounted
-       return () => {
-           subscription.remove();
-       }
+       // aborting invalidates the session
+       return () => controller.abort();
    }, []);
    ```
-2. When the user indicates that he/she wants to perform the HCE action, call the following function from the button's onClick routine:
-   ```typescript
-   await NativeHCEModule.beginSession();
-   ```
-   This will emit `sessionStarted` event right after the function call, on both iOS and Android platforms. After the session is started, you can decide to start HCE emulation right away in the event handler:
-   ```typescript
-   // inside NativeHCEModule.onEvent handler's switch
-   case 'sessionStarted':
-       NativeHCEModule.setSessionAlertMessage('Tap towards the reader');  // only for iOS, no-op in Android
-       await NativeHCEModule.startHCE();
-       break;
-   ```
-   Calling `await NativeHCEModule.startHCE()` causes:
-   * iOS: Your smartphone will start listening for C-APDUs (Command APDUs originating from reader devices) right after that function is called, which will be additionally indicated by the operating system popping out the NFC scanning user interface prompt.
-   * Android: HCE commands will be forwarded to your application from that point on. No specific user interface is displayed (you have to implement it on your own, within your app).
-3. Optionally, you can handle `readerDetected` and `readerDeselected` events to enhance user's experience.
-   ```typescript
-   // inside NativeHCEModule.onEvent handler's switch
-   case 'readerDetected':
-       NativeHCEModule.setSessionAlertMessage('Reader detected');  // only for iOS, no-op in Android
-       break;
 
-    case 'readerDeselected':
-       NativeHCEModule.setSessionAlertMessage('Lost reader');  // only for iOS, no-op in Android
-       break;
-   ```
-   For those events, trigger mechanisms are platform dependent:
-   * iOS: The `readerDetected` event will be emitted as soon as the NFC reader's field presence is observed. The `readerDeselected` event will be emitted if the reader is physically disconnected or a non-matching AID is selected by the reader.
-   * Android: The `readerDetected` event will be emitted as soon as the first matching SELECT AID command is observed. The `readerDeselected` event will be emitted if the reader is physically disconnected or a non-matching AID is selected by the reader.
+#### Events
 
-   The device lock state is reported through the `deviceLocked` and `deviceUnlocked` events, which are the only source of truth about it. One of them is always emitted before the `received` event of the first C-APDU of a session, so the state is known upfront.
-   ```typescript
-   case 'deviceLocked':
-       setDeviceLocked(true);
-       break;
+For the reader-related handlers, trigger mechanisms are platform dependent:
+* iOS: `onReaderDetected` is called as soon as the NFC reader's field presence is observed. `onReaderLost` is called if the reader is physically disconnected or a non-matching AID is selected by the reader.
+* Android: `onReaderDetected` is called as soon as the first matching SELECT AID command is observed. `onReaderLost` is called if the reader is physically disconnected, a non-matching AID is selected by the reader or the emulation is stopped.
 
-   case 'deviceUnlocked':
-       setDeviceLocked(false);
-       break;
-   ```
-   For the lock state events, trigger mechanisms are platform dependent:
-   * iOS: The event is always `deviceUnlocked` - it's impossible to communicate over HCE while the device is locked, so the state cannot change during a session.
-   * Android: The state is re-sampled whenever a C-APDU arrives and, if it differs from the one reported so far, the corresponding event is emitted straight before the `received` event of that C-APDU. C-APDUs are always forwarded - it is up to you to decide how to treat a locked device.
-4. Receive incoming C-APDU and respond to it:
-   ```typescript
-   // inside NativeHCEModule.onEvent handler's switch
-   case 'received':
-       NativeHCEModule.setSessionAlertMessage('Keep holding the tag');  // only for iOS, no-op on Android
+The `deviceLocked` flag of each C-APDU:
+* iOS: Always `false` - it's impossible to communicate over HCE while the device is locked.
+* Android: Sampled when the C-APDU arrives. C-APDUs are always forwarded - it is up to you to decide how to treat a locked device.
 
-       // decode incoming C-APDU to bytes
-       const capdu = Buffer.from(event.arg!, 'hex');
-       console.log('Received C-APDU, capdu.toString('hex'));
-   
-       // for the demo purposes, we always want to respond with [0x0A] + status code 0x9000 (success)
-       await NativeHCEModule.respondAPDU(null, Buffer.from([0x0A, 0x90, 0x00]).toString("hex"));
-       break;
-   ```
-   You don't have to respond to the APDU right away from within the event handler, but please remember that the reader might time out if you will be lingering with the response for too long.
+#### Status words sent by the library
+
+| Situation | Status word |
+|---|---|
+| The handler has thrown an exception or returned an invalid response | `6F00` (no precise diagnosis) |
+| Android: nobody can handle the interaction, response to SELECT | `6A82` (file or application not found) |
+| Android: nobody can handle the interaction, response to other commands | `6985` (conditions of use not satisfied) |
 
 ### iOS: Acquiring exclusive NFC access
 
 If you need to utilize `NFCPresentmentIntentAssertion` for enhanced user experience, call:
 ```typescript
-await NativeHCEModule.acquireExclusiveNFC();
+await HCE.acquireExclusiveNFC();
 ```
 This function will acquire an exclusive NFC access for 15 seconds. No system services or other applications will be able to interfere with NFC during that period. For example, the NFC background tag reading will be disabled so it would not generate any distracting notifications.
 
-While both session and exclusive NFC access are active, you will receive `readerDetected` events even when the HCE emulation is not started at the time (without any explicit UI being displayed by the system). You can then make a call to `startHCE` to initiate the interaction automatically, without needing the user to click anything beforehand.
+While both session and exclusive NFC access are active, `onReaderDetected` is called even when the emulation is not started at the time (without any explicit UI being displayed by the system). You can then call `session.startEmulation()` from within that handler to initiate the interaction automatically, without needing the user to click anything beforehand.
 
 This function will throw an exception if:
 * the presentment intent assertion was already acquired and is still active;
 * you are in the cooldown period where you are not allowed to acquire the presentment intent assertion (cooldown is 15 seconds after the previous assertion had expired);
-* the feature is not supported or the device is not eligible for whatever reason;
+* the feature is not supported or the device is not eligible for whatever reason (rejects with `err_platform_unsupported` on Android).
 
-You can check if you are holding an exclusive NFC access by calling:
-```typescript
-NativeHCEModule.isExclusiveNFC()
-```
-
-Whenever you don't need the exclusive NFC access anymore, call the following function to release the `NFCPresentmentIntentAssertion` object:
-```typescript
-NativeHCEModule.releaseExclusiveNFC();
-```
+You can check if you are holding an exclusive NFC access by calling `HCE.isExclusiveNFC()`. Whenever you don't need the exclusive NFC access anymore, call `HCE.releaseExclusiveNFC()`.
 
 > [!TIP]
 > Your exclusive NFC access might time out after exceeding certain allowance period imposed by iOS. Thus, you should periodically poll
-> the `NativeHCEModule.isExclusiveNFC()` value to see if it's still granted. You might decide to navigate into a different UI view
-> once your assertion has timed out, or indicate that in some different way.
+> the `HCE.isExclusiveNFC()` value to see if it's still granted.
 
 > [!TIP]
-> Use the React's [AppState](https://reactnative.dev/docs/appstate) listener to see when your app goes out to background.
-> In such event, call `NativeHCEModule.releaseExclusiveNFC()` to explicitly release the exclusive NFC assertion.
->
-> You must do so in order to avoid running into ambigous states, since the operating system is not going to enforce your
-> exclusive NFC access anyway, as your app has gone to background.
-> 
-> You can attempt to acquire the exclusive access assertion again once your app has gone back to foreground (active state).
+> Use the React's [AppState](https://reactnative.dev/docs/appstate) listener to see when your app goes out to background
+> and call `HCE.releaseExclusiveNFC()` in such event. The operating system is not going to enforce your exclusive NFC access
+> anyway, as your app has gone to background.
 
-### Android: Handle HCE calls when the app is not running
+### Android: Handling HCE interactions without an active session
 
-Exclusively on Android platform it is possible to handle Host Card Emulation even when the app is not running in foreground.
-In such case, no user interface will be available, the handler will run in headless mode. This is still extremely useful in certain cases,
-for instance - your app may emulate an NDEF tag even when it's not launched on the foreground.
+Exclusively on Android platform it is possible to handle HCE interactions while the app has no session with running
+emulation. The background handler is used when:
+* the app is not running at all (it's started in headless mode, no user interface is available);
+* the app is in background;
+* the app is in foreground, but it has no session with running emulation.
 
-1. Register `handleBackgroundHCECall` headless task in your app's `index.js`:
-   ```typescript
-   import { BackgroundHCETaskData, createBackgroundHCE } from '@icedevml/react-native-host-card-emulation/js/hceBackground';
+Register the handler at the top level of your app's entry file (`index.js`):
+```typescript
+import { AppRegistry } from 'react-native';
+import HCE from '@icedevml/react-native-host-card-emulation';
 
-   AppRegistry.registerHeadlessTask('handleBackgroundHCECall', () => {
-      return async (taskData: BackgroundHCETaskData) => {
-         return await runBackgroundHCETask(createBackgroundHCE(taskData));
-      }
-   });
-   ```
-   Pass the whole `taskData` object to `createBackgroundHCE()`, so that it could be handed over to your event handler as its third argument. The device lock state is reported to your handler as `deviceLocked` and `deviceUnlocked` events: always before the `received` event of the first C-APDU of a session, and then again straight before the `received` event of any C-APDU during which a change of that state was noticed. C-APDUs are always forwarded - it is up to you to decide how to treat a locked device.
-2. Implement your background HCE handler by passing an event callback to `processBackgroundHCE()`:
-   ```typescript
-   import { Buffer } from 'buffer/';
-   import {
-     ProcessBackgroundHCEFunc,
-   } from '@icedevml/react-native-host-card-emulation/js/hceBackground';
+HCE.registerBackgroundHandler(({ sessionId, appState }) => {
+    // called once per interaction with the reader - keep the state of the interaction in this closure
+    // appState: 'background' or 'foreground' (the app is in foreground, but has no active session)
+    return {
+        onApdu: async (apdu) => {
+            return new Uint8Array([0x0A, 0x90, 0x00]);
+        },
+        // the interaction ends after this handler has finished
+        onReaderLost: () => {
+            // cleanup any side effects of the interaction
+        },
+    };
+});
 
-   export default async function runBackgroundHCETask(processBackgroundHCE: ProcessBackgroundHCEFunc) {
-      // ... initialize any state keeping variables here ...
+AppRegistry.registerComponent(appName, () => App);
+```
 
-      processBackgroundHCE(async (event, respondAPDU, taskData) => {
-         switch (event.type) {
-            /* ... background HCE event handler here ... */
-         }
-      });
-   }
-   ```
-3. Whenever you receive `readerDeselected` event, cleanup any side effects (deallocate resources, reset the state back to initial) -- this is obligatory because lack of proper cleanup will result in bugs and unexpected behavior.
-   ```typescript
-   // inside processBackgroundHCE handler's switch
-   case 'readerDeselected':
-       // our application was deselected or the reader field was lost
-       // perform a cleanup of any resources here
-       break;
-   ```
-4. Implement the actual APDU handler that will process the C-APDU and generate a response.
-   ```typescript
-   // inside processBackgroundHCE handler's switch
-   case 'received':
-       // decode incoming C-APDU to bytes
-       const capdu = Buffer.from(event.arg!, 'hex');
-       console.log('Received C-APDU, capdu.toString('hex'));
-      
-       // for the demo purposes, we always want to respond with [0x0A] + status code 0x9000 (success)
-       await respondAPDU(Buffer.from([0x0A, 0x90, 0x00]).toString("hex"));
-       break;
-   ```
+The factory may also return a promise (e.g. to load some state from the storage) - the C-APDUs are held by the library
+until it resolves. If no background handler is registered, the reader receives an error status word (see the table above).
 
-> [!WARNING]
-> Please note that under some circumstances you might find that your `runBackgroundHCETask()` is running in a few instances concurrently.
-> An example of such situation could be when you receive a C-APDU and the reader rapidly restarts the NFC field and reselects your application
-> before you manage to respond to the original command. Thus, you should not use any global variables to track the state of your app.
->
-> The library automatically identifies stale (deselected) background tasks. For such stale tasks, any subsequent calls to `await respondAPDU()`
-> will throw an error to prevent communication glitches.
+Routing rules on Android:
+1. If there is a session with running emulation, it handles the interaction (also when the app went to background in the meantime - stop the emulation on `AppState` change if you don't want that).
+2. Otherwise, the background handler handles the interaction.
+3. If there is no background handler, the reader receives an error status word.
+
+The decision is made when the reader selects the application and it doesn't change until the reader is lost. If the interaction
+was rejected, the reader may re-select the application later (e.g. after you have started the emulation) and it will be routed again.
+
+### Error codes
+
+Promises returned by the library reject with errors having a `code` property:
+
+| Code | Meaning |
+|---|---|
+| `err_platform_unsupported` | The device or the OS doesn't support the requested feature. |
+| `err_session_exists` | Another session is already active. |
+| `err_no_session` | The session is not active anymore. |
+| `err_session_invalidated` | The session was invalidated while it was being started. |
+| `err_aborted` | `beginSession()` was aborted through the `AbortSignal`. |
+| `err_start_emulation` | iOS: The OS has refused to start the emulation. |
+| `err_nfc_reader_not_available`, `err_card_session_unsupported`, `err_card_session_not_eligible`, `err_create_card_session` | iOS: Preflight checks or session creation failed. |
+| `err_already_exists`, `err_acquire_presentment` | iOS: `acquireExclusiveNFC()` failed. |
+
+### Migrating from 0.x
+
+| 0.x | 1.0 |
+|---|---|
+| `import NativeHCEModule from '.../js/NativeHCEModule'` | `import HCE from '@icedevml/react-native-host-card-emulation'` |
+| `isPlatformSupported()` | `await HCE.getCapabilities()` |
+| `NativeHCEModule.onEvent(...)` + `beginSession()` | `const session = await HCE.beginSession(handlers)` |
+| `'received'` event + `respondAPDU(null, hex)` | return the R-APDU from `onApdu` |
+| `'readerDetected'` / `'readerDeselected'` events | `onReaderDetected` / `onReaderLost` handlers |
+| `'deviceLocked'` / `'deviceUnlocked'` events | `apdu.deviceLocked` flag |
+| `'sessionInvalidated'` event | `onInvalidated` handler / `session.closed` |
+| `startHCE()` / `stopHCE(status)` / `isHCERunning()` | `session.startEmulation()` / `session.stopEmulation(status)` / `session.isEmulationRunning()` |
+| `setSessionAlertMessage()` / `invalidateSession()` | `session.setAlertMessage()` / `session.invalidate()` |
+| `registerHeadlessTask('handleBackgroundHCECall', ...)` + `createBackgroundHCE()` | `HCE.registerBackgroundHandler(factory)` |
+
+Note that on Android, the background handler is now also used when the app is in foreground without an active session
+(0.x has responded with `6999` in such case).
 
 ### More resources
 
-* [Module's API specification](https://github.com/icedevml/react-native-host-card-emulation/tree/master/packages/host-card-emulation/js)
 * [Source Code for Demo Application: NDEF NFC Type 4 Tag Emulator (for iOS/Android)](https://github.com/icedevml/react-native-host-card-emulation/tree/master/packages/demo-ndef-app)

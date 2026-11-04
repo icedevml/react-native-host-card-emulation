@@ -1,84 +1,63 @@
 import React from 'react';
-import { Button, EventSubscription, StyleSheet, Text } from 'react-native';
+import { Alert, Button, StyleSheet, Text } from 'react-native';
 
 import { Buffer } from 'buffer/';
 
-import NativeHCEModule, {
-  HCEModuleEvent,
-} from '@icedevml/react-native-host-card-emulation/js/NativeHCEModule';
+import HCE, { HCESession } from '@icedevml/react-native-host-card-emulation';
 import { createNDEFType4TagApp } from '../ndefType4TagApp.ts';
+import useEventLog from './useEventLog.ts';
 
 interface IProps {
   setCurrentView: (view: string) => void;
 }
 
 function ContinousHCEView({ setCurrentView }: IProps): React.JSX.Element {
-  const [recentEventsList, setRecentEventsList] = React.useState<string[]>([]);
-  const [getNDEFAppState, resetNDEFAppState, handleCAPDU] = React.useMemo(
+  const [recentEvents, addEvent] = useEventLog();
+  const [_getNDEFAppState, resetNDEFAppState, handleCAPDU] = React.useMemo(
     () => createNDEFType4TagApp(),
     [],
   );
 
   React.useEffect(() => {
-    let isMounted = true;
-    let subscription: EventSubscription | null = null;
+    // aborting invalidates the session, even if it's still being started
+    const controller = new AbortController();
 
     (async () => {
-      if (!isMounted) {
-        return;
-      }
+      let session: HCESession;
 
-      subscription = NativeHCEModule.onEvent(async (event: HCEModuleEvent) => {
-        try {
-          console.log('received event', event);
-          setRecentEventsList(prevState => {
-            const data = [...prevState, event.type + ' ' + event.arg];
-            return data.slice(-15);
-          });
-
-          switch (event.type) {
-            case 'readerDetected':
+      try {
+        session = await HCE.beginSession(
+          {
+            onApdu: apdu => {
+              addEvent('apdu ' + Buffer.from(apdu.command).toString('hex'));
+              return handleCAPDU(Buffer.from(apdu.command));
+            },
+            onReaderDetected: () => {
+              addEvent('readerDetected');
               resetNDEFAppState();
-              break;
-
-            case 'readerDeselected':
-              break;
-
-            case 'sessionStarted':
-              await NativeHCEModule.startHCE();
-              break;
-
-            case 'sessionInvalidated':
+            },
+            onReaderLost: () => addEvent('readerLost'),
+            onInvalidated: reason => {
+              addEvent('invalidated ' + reason);
               setCurrentView('main');
-              break;
+            },
+          },
+          { signal: controller.signal },
+        );
 
-            case 'received':
-              const capdu = Buffer.from(event.arg!, 'hex');
-              await NativeHCEModule.respondAPDU(
-                null,
-                handleCAPDU(capdu).toString('hex'),
-              );
-              break;
-          }
-        } catch (err) {
-          console.error('error in event handler', err);
+        await session.startEmulation();
+        addEvent('emulation started');
+      } catch (e) {
+        if (!controller.signal.aborted) {
+          console.error('failed to start HCE', e);
+          Alert.alert('Error', 'Failed to start HCE: ' + e);
+          setCurrentView('main');
         }
-      });
-
-      await NativeHCEModule.beginSession();
-
-      if (!isMounted) {
-        NativeHCEModule.invalidateSession();
       }
     })();
 
-    return () => {
-      NativeHCEModule.invalidateSession();
-      subscription?.remove();
-    };
-  }, [getNDEFAppState, resetNDEFAppState, handleCAPDU, setCurrentView]);
-
-  let recentEvents = recentEventsList.join('\n');
+    return () => controller.abort();
+  }, [addEvent, resetNDEFAppState, handleCAPDU, setCurrentView]);
 
   return (
     <>
@@ -100,10 +79,6 @@ function ContinousHCEView({ setCurrentView }: IProps): React.JSX.Element {
 }
 
 const styles = StyleSheet.create({
-  safeAreaView: {
-    flex: 1,
-    backgroundColor: 'white',
-  },
   text: {
     margin: 10,
     fontSize: 20,
@@ -114,15 +89,6 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: 'bold',
     color: 'black',
-  },
-  textInput: {
-    margin: 10,
-    height: 40,
-    borderColor: 'black',
-    borderWidth: 1,
-    paddingLeft: 5,
-    paddingRight: 5,
-    borderRadius: 5,
   },
 });
 

@@ -1,25 +1,22 @@
 import { Buffer } from 'buffer/';
 
-import {
-  ProcessBackgroundHCEFunc,
-} from '@icedevml/react-native-host-card-emulation/js/hceBackground';
+import type { BackgroundHandlerFactory } from '@icedevml/react-native-host-card-emulation';
 import { createNDEFType4TagApp } from './ndefType4TagApp.ts';
 
+/*
+ Called once per interaction with the reader, so the NDEF tag state is never shared between
+ concurrent interactions.
+ */
+const createBackgroundHandler: BackgroundHandlerFactory = ({ sessionId, appState }) => {
+  const [_getNDEFAppState, _resetNDEFAppState, handleCAPDU] = createNDEFType4TagApp();
+  console.log('background HCE interaction started', sessionId, appState);
 
-export default async function runBackgroundHCETask(processBackgroundHCE: ProcessBackgroundHCEFunc) {
-  const [_getNDEFAppState, _resetNDEFAppState, handleCAPDU] = createNDEFType4TagApp()
+  return {
+    onApdu: apdu => handleCAPDU(Buffer.from(apdu.command)),
+    onReaderLost: () => {
+      console.log('background HCE interaction finished', sessionId);
+    },
+  };
+};
 
-  processBackgroundHCE(async (event, respondAPDU, taskData) => {
-    console.log('background HCE event', event.type, 'handle', taskData.handle);
-
-    switch (event.type) {
-      case 'received':
-        const capdu = Buffer.from(event.arg!, 'hex');
-        await respondAPDU(handleCAPDU(capdu).toString("hex"));
-        break;
-
-      case 'readerDeselected':
-        break;
-    }
-  });
-}
+export default createBackgroundHandler;

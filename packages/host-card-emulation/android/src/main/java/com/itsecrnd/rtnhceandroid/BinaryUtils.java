@@ -44,13 +44,15 @@ public class BinaryUtils {
     /**
      * Utility method to convert a hexadecimal string to a byte string.
      *
-     * <p>Behavior with input strings containing non-hexadecimal characters is undefined.
-     *
      * @param s String containing hexadecimal characters to convert
      * @return Byte array generated from input
-     * @throws java.lang.IllegalArgumentException if input length is incorrect
+     * @throws java.lang.IllegalArgumentException if input is null, its length is incorrect
+     *                                            or it contains non-hexadecimal characters
      */
     public static byte[] HexStringToByteArray(String s) throws IllegalArgumentException {
+        if (s == null) {
+            throw new IllegalArgumentException("Hex string must not be null");
+        }
         int len = s.length();
         if (len % 2 == 1) {
             throw new IllegalArgumentException("Hex string must have even number of characters");
@@ -58,8 +60,12 @@ public class BinaryUtils {
         byte[] data = new byte[len / 2]; // Allocate 1 byte per 2 hex characters
         for (int i = 0; i < len; i += 2) {
             // Convert each character into a integer (base-16), then bit-shift into place
-            data[i / 2] = (byte) ((Character.digit(s.charAt(i), 16) << 4)
-                    + Character.digit(s.charAt(i + 1), 16));
+            int hi = Character.digit(s.charAt(i), 16);
+            int lo = Character.digit(s.charAt(i + 1), 16);
+            if (hi < 0 || lo < 0) {
+                throw new IllegalArgumentException("Hex string contains non-hexadecimal characters");
+            }
+            data[i / 2] = (byte) ((hi << 4) + lo);
         }
         return data;
     }

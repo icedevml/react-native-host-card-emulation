@@ -3,97 +3,75 @@ import { Alert, Button, StyleSheet, Text } from 'react-native';
 
 import { Buffer } from 'buffer/';
 
-import NativeHCEModule, {
-  HCEModuleEvent,
-} from '@icedevml/react-native-host-card-emulation/js/NativeHCEModule';
+import HCE, { HCESession } from '@icedevml/react-native-host-card-emulation';
 import { createNDEFType4TagApp } from '../ndefType4TagApp.ts';
+import useEventLog from './useEventLog.ts';
 
 interface IProps {
   setCurrentView: (view: string) => void;
 }
 
 function UserInteractionHCEView({ setCurrentView }: IProps): React.JSX.Element {
-  const [recentEventsList, setRecentEventsList] = React.useState<string[]>([]);
+  const [recentEvents, addEvent] = useEventLog();
   const [getNDEFAppState, resetNDEFAppState, handleCAPDU] = React.useMemo(
     () => createNDEFType4TagApp(),
     [],
   );
+  const sessionRef = React.useRef<HCESession | null>(null);
 
-  React.useEffect(() => {
-    const subscription = NativeHCEModule.onEvent(
-      async (event: HCEModuleEvent) => {
-        try {
-          console.log('received event', event);
-          setRecentEventsList(prevState => {
-            const data = [...prevState, event.type + ' ' + event.arg];
-            return data.slice(-15);
-          });
-
-          switch (event.type) {
-            case 'readerDetected':
-              resetNDEFAppState();
-              NativeHCEModule.setSessionAlertMessage('Reader detected');
-              break;
-
-            case 'readerDeselected':
-              if (getNDEFAppState().wasNDEFRead) {
-                await NativeHCEModule.stopHCE('success');
-              } else {
-                NativeHCEModule.setSessionAlertMessage('Lost reader');
-              }
-              break;
-
-            case 'sessionStarted':
-              NativeHCEModule.setSessionAlertMessage('Tap towards the reader');
-              await NativeHCEModule.startHCE();
-              break;
-
-            case 'sessionInvalidated':
-              if (event.arg === 'maxSessionDurationReached') {
-                Alert.alert(
-                  'Information',
-                  'Session has timed out and thus was invalidated ' +
-                    'by the operating system.',
-                );
-              }
-              break;
-
-            case 'received':
-              const capdu = Buffer.from(event.arg!, 'hex');
-              await NativeHCEModule.respondAPDU(
-                null,
-                handleCAPDU(capdu).toString('hex'),
-              );
-
-              if (getNDEFAppState().wasNDEFRead) {
-                NativeHCEModule.setSessionAlertMessage(
-                  'Successfully emulated NDEF!',
-                );
-              }
-              break;
-          }
-        } catch (err) {
-          console.error('error in event handler', err);
-        }
-      },
-    );
-
-    return () => {
-      subscription.remove();
-    };
-  }, [getNDEFAppState, resetNDEFAppState, handleCAPDU]);
+  // close the session when the view is exited
+  React.useEffect(() => () => sessionRef.current?.invalidate(), []);
 
   async function doBeginSession() {
+    sessionRef.current?.invalidate();
+    sessionRef.current = null;
+
     try {
-      await NativeHCEModule.beginSession();
+      const session = await HCE.beginSession({
+        onApdu: apdu => {
+          const response = handleCAPDU(Buffer.from(apdu.command));
+
+          if (getNDEFAppState().wasNDEFRead) {
+            sessionRef.current?.setAlertMessage('Successfully emulated NDEF!');
+          }
+
+          return response;
+        },
+        onReaderDetected: () => {
+          addEvent('readerDetected');
+          resetNDEFAppState();
+          sessionRef.current?.setAlertMessage('Reader detected');
+        },
+        onReaderLost: async () => {
+          addEvent('readerLost');
+
+          if (getNDEFAppState().wasNDEFRead) {
+            await sessionRef.current?.stopEmulation('success');
+          } else {
+            sessionRef.current?.setAlertMessage('Lost reader');
+          }
+        },
+        onInvalidated: reason => {
+          addEvent('invalidated ' + reason);
+
+          if (reason === 'maxSessionDurationReached') {
+            Alert.alert(
+              'Information',
+              'Session has timed out and thus was invalidated by the operating system.',
+            );
+          }
+        },
+      });
+
+      sessionRef.current = session;
+      session.setAlertMessage('Tap towards the reader');
+      await session.startEmulation();
+      addEvent('emulation started');
     } catch (error) {
       console.error('beginSession err', error);
       Alert.alert('Error', 'Failed to begin NFC session: ' + error);
-      return;
     }
   }
-
-  let recentEvents = recentEventsList.join('\n');
 
   return (
     <>
@@ -113,10 +91,6 @@ function UserInteractionHCEView({ setCurrentView }: IProps): React.JSX.Element {
 }
 
 const styles = StyleSheet.create({
-  safeAreaView: {
-    flex: 1,
-    backgroundColor: 'white',
-  },
   text: {
     margin: 10,
     fontSize: 20,
@@ -127,15 +101,6 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: 'bold',
     color: 'black',
-  },
-  textInput: {
-    margin: 10,
-    height: 40,
-    borderColor: 'black',
-    borderWidth: 1,
-    paddingLeft: 5,
-    paddingRight: 5,
-    borderRadius: 5,
   },
 });
 

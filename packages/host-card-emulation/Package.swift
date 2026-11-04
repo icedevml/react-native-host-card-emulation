@@ -1,11 +1,14 @@
 // swift-tools-version: 6.0
-// HAND-WRITTEN split manifest (#3218 S11): this package mixes Swift and
-// Objective-C(++) sources, which Swift Package Manager cannot compile in a
-// single target. Measured import direction: the ObjC side registers/bridges the
-// Swift classes (it imports the generated "-Swift.h"), so the ObjC(++) target
-// depends on the Swift target and never the reverse. The bridging header only
-// pulled in React/system headers, which the Swift target gets via the React
-// headers products ("import React"), so no project-ObjC bridging remains.
+//
+// Swift Package Manager support for React Native's SwiftPM autolinking (react-native >= 0.87, experimental).
+// CocoaPods users are unaffected, see RTNHCEModuleIOS.podspec.
+//
+// This package mixes Swift and Objective-C(++) sources, which Swift Package Manager can't compile
+// in a single target. The ObjC++ TurboModule (RTNHCEModuleIOS.mm) calls into the Swift implementation
+// (RTNHCEModuleIOSImpl.swift), so the ObjC target depends on the Swift target and never the reverse.
+//
+// The two React Native packages are resolved by the autolinker relative to
+// build/generated/autolinking/libs/<package> in the app.
 import PackageDescription
 
 let reactHeaders: [Target.Dependency] = [
@@ -17,6 +20,8 @@ let reactHeaders: [Target.Dependency] = [
 
 let package = Package(
     name: "ReactNativeHostCardEmulation",
+    // Must not exceed RN's generated Autolinked aggregate (iOS 15.0). HCE itself requires iOS 17.4,
+    // which is checked at runtime.
     platforms: [.iOS(.v15)],
     products: [
         .library(name: "ReactNativeHostCardEmulation", targets: ["ReactNativeHostCardEmulationSwift", "ReactNativeHostCardEmulationObjC"]),
@@ -36,9 +41,10 @@ let package = Package(
                 "ios/RTNHCEModuleIOS.mm",
             ],
             sources: [
-                      "ios/RTNHCEModuleIOSImpl.swift"
+                "ios/RTNHCEModuleIOSImpl.swift",
             ],
             linkerSettings: [
+                .linkedFramework("CoreNFC"),
                 .linkedFramework("UIKit"),
                 .linkedFramework("Foundation"),
             ]
@@ -54,11 +60,14 @@ let package = Package(
             ],
             publicHeadersPath: "ios",
             cSettings: [
+                // SwiftPM autolinking is New Architecture only; CocoaPods gets this from install_modules_dependencies.
+                .define("RCT_NEW_ARCH_ENABLED", to: "1"),
                 .headerSearchPath("ios"),
                 .headerSearchPath("."),
                 .unsafeFlags(["-include", "react-native-spm-prefix.h"]),
             ],
             cxxSettings: [
+                .define("RCT_NEW_ARCH_ENABLED", to: "1"),
                 .headerSearchPath("ios"),
                 .headerSearchPath("."),
                 .unsafeFlags(["-include", "react-native-spm-prefix.h"]),
@@ -66,6 +75,7 @@ let package = Package(
                 .define("NDEBUG", .when(configuration: .release)),
             ],
             linkerSettings: [
+                .linkedFramework("CoreNFC"),
                 .linkedFramework("UIKit"),
                 .linkedFramework("Foundation"),
                 .linkedFramework("CoreGraphics"),
