@@ -1,8 +1,9 @@
 package com.itsecrnd.rtnhceandroid;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-import com.facebook.react.TurboReactPackage;
+import com.facebook.react.BaseReactPackage;
 import com.facebook.react.bridge.NativeModule;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.module.model.ReactModuleInfo;
@@ -11,10 +12,10 @@ import com.facebook.react.module.model.ReactModuleInfoProvider;
 import java.util.HashMap;
 import java.util.Map;
 
-public class RTNHCEAndroidPackage extends TurboReactPackage {
+public class RTNHCEAndroidPackage extends BaseReactPackage {
     @Nullable
     @Override
-    public NativeModule getModule(String name, ReactApplicationContext reactContext) {
+    public NativeModule getModule(@NonNull String name, @NonNull ReactApplicationContext reactContext) {
         if (name.equals(RTNHCEAndroidModule.NAME)) {
             return new RTNHCEAndroidModule(reactContext);
         } else {
@@ -22,6 +23,7 @@ public class RTNHCEAndroidPackage extends TurboReactPackage {
         }
     }
 
+    @NonNull
     @Override
     public ReactModuleInfoProvider getReactModuleInfoProvider() {
         return () -> {
@@ -33,7 +35,6 @@ public class RTNHCEAndroidPackage extends TurboReactPackage {
                             RTNHCEAndroidModule.NAME,
                             false, // canOverrideExistingModule
                             false, // needsEagerInit
-                            true, // hasConstants
                             false, // isCxxModule
                             true // isTurboModule
                     ));
