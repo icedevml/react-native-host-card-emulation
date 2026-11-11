@@ -1,35 +1,68 @@
 import React from 'react';
-import { Alert, Button, StyleSheet, Text } from 'react-native';
+import { Alert, Text } from 'react-native';
 
 import { Buffer } from 'buffer/';
 
 import HCE, { HCESession } from '@icedevml/react-native-host-card-emulation';
 import { createNDEFType4TagApp } from '../ndefType4TagApp.ts';
-import useEventLog from './useEventLog.ts';
+import createBackgroundHandler from '../background.ts';
+import { logApdu, logEvent } from './eventLog.ts';
+import EventLogView from './EventLogView.tsx';
+import { ActionButton, BackButton, Section, textStyles } from './ui.tsx';
 
 interface IProps {
   setCurrentView: (view: string) => void;
 }
 
 function UserInteractionHCEView({ setCurrentView }: IProps): React.JSX.Element {
-  const [recentEvents, addEvent] = useEventLog();
   const [getNDEFAppState, resetNDEFAppState, handleCAPDU] = React.useMemo(
-    () => createNDEFType4TagApp(),
+    () => createNDEFType4TagApp('https://example.com/'),
     [],
   );
   const sessionRef = React.useRef<HCESession | null>(null);
+  // identifies the current session, so that the events of the replaced ones don't change the UI
+  const generationRef = React.useRef(0);
+  const [emulating, setEmulating] = React.useState(false);
 
-  // close the session when the view is exited
-  React.useEffect(() => () => sessionRef.current?.invalidate(), []);
+  React.useEffect(() => {
+    // in this demo, nothing happens until the user starts the emulation
+    HCE.unregisterBackgroundHandler();
+    logEvent('HCE.unregisterBackgroundHandler()');
+
+    return () => {
+      invalidateSession();
+      HCE.registerBackgroundHandler(createBackgroundHandler);
+      logEvent('HCE.registerBackgroundHandler()');
+    };
+  }, []);
+
+  function invalidateSession() {
+    if (sessionRef.current) {
+      sessionRef.current.invalidate();
+      sessionRef.current = null;
+      logEvent('HCESession.invalidate()');
+    }
+  }
+
+  function stopSession() {
+    generationRef.current++;
+    invalidateSession();
+    setEmulating(false);
+  }
 
   async function doBeginSession() {
-    sessionRef.current?.invalidate();
-    sessionRef.current = null;
+    const generation = ++generationRef.current;
+    const isCurrent = () => generation === generationRef.current;
+
+    invalidateSession();
+    setEmulating(true);
 
     try {
       const session = await HCE.beginSession({
         onApdu: apdu => {
-          const response = handleCAPDU(Buffer.from(apdu.command));
+          const command = Buffer.from(apdu.command);
+          const response = handleCAPDU(command);
+          logApdu(command, response);
 
           if (getNDEFAppState().wasNDEFRead) {
             sessionRef.current?.setAlertMessage('Successfully emulated NDEF!');
@@ -38,21 +71,30 @@ function UserInteractionHCEView({ setCurrentView }: IProps): React.JSX.Element {
           return response;
         },
         onReaderDetected: () => {
-          addEvent('readerDetected');
+          logEvent('onReaderDetected()');
           resetNDEFAppState();
           sessionRef.current?.setAlertMessage('Reader detected');
         },
         onReaderLost: async () => {
-          addEvent('readerLost');
+          logEvent('onReaderLost()');
 
           if (getNDEFAppState().wasNDEFRead) {
             await sessionRef.current?.stopEmulation('success');
+            logEvent('HCESession.stopEmulation(success)');
+
+            if (isCurrent()) {
+              setEmulating(false);
+            }
           } else {
             sessionRef.current?.setAlertMessage('Lost reader');
           }
         },
         onInvalidated: reason => {
-          addEvent('invalidated ' + reason);
+          logEvent(`onInvalidated(${reason})`);
+
+          if (isCurrent()) {
+            setEmulating(false);
+          }
 
           if (reason === 'maxSessionDurationReached') {
             Alert.alert(
@@ -64,10 +106,15 @@ function UserInteractionHCEView({ setCurrentView }: IProps): React.JSX.Element {
       });
 
       sessionRef.current = session;
+      logEvent('HCE.beginSession()');
       session.setAlertMessage('Tap towards the reader');
       await session.startEmulation();
-      addEvent('emulation started');
+      logEvent('HCESession.startEmulation()');
     } catch (error) {
+      if (isCurrent()) {
+        setEmulating(false);
+      }
+
       console.error('beginSession err', error);
       Alert.alert('Error', 'Failed to begin NFC session: ' + error);
     }
@@ -75,33 +122,26 @@ function UserInteractionHCEView({ setCurrentView }: IProps): React.JSX.Element {
 
   return (
     <>
-      <Button
-        title="Back to main menu"
-        onPress={() => setCurrentView('main')}
-      />
-      <Text style={styles.headerText}>Starting HCE after user interaction</Text>
-      <Text style={styles.text}>
-        Tap on the button below to start the HCE session. Then, tap your
-        smartphone to the reader.
-      </Text>
-      <Button title="Begin HCE session&emulation" onPress={doBeginSession} />
-      <Text style={styles.text}>{recentEvents}</Text>
+      <BackButton onPress={() => setCurrentView('main')} />
+      <Section title="Starting HCE after user interaction">
+        <Text style={textStyles.body}>
+          Tap on the button below to start the HCE session. Then, tap your
+          smartphone to the reader.
+        </Text>
+        <Text style={textStyles.hint}>
+          The emulated tag contains https://example.com/. Background handling is
+          disabled while this view is open.
+        </Text>
+        <ActionButton
+          title={emulating ? 'Emulation running' : 'Begin HCE session & emulation'}
+          subtitle={emulating ? 'Tap to stop' : undefined}
+          active={emulating}
+          onPress={emulating ? stopSession : doBeginSession}
+        />
+      </Section>
+      <EventLogView />
     </>
   );
 }
-
-const styles = StyleSheet.create({
-  text: {
-    margin: 10,
-    fontSize: 20,
-    color: 'black',
-  },
-  headerText: {
-    margin: 10,
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: 'black',
-  },
-});
 
 export default UserInteractionHCEView;

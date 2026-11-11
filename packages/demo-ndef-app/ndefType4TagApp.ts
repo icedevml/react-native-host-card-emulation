@@ -13,7 +13,9 @@ export type NDEFType4TagApp = [
   handleCAPDU: (capdu: Buffer) => Buffer,
 ]
 
-export function createNDEFType4TagApp(): NDEFType4TagApp {
+export const DEFAULT_NDEF_URL = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
+
+export function createNDEFType4TagApp(url: string = DEFAULT_NDEF_URL): NDEFType4TagApp {
   let wasNDEFRead: boolean = false;
   let currentFile: Buffer | null = null;
 
@@ -29,7 +31,7 @@ export function createNDEFType4TagApp(): NDEFType4TagApp {
   const fileE104 = Buffer.concat([
     Buffer.alloc(2),
     Buffer.from(
-      NDEF.encodeMessage([NDEF.uriRecord("https://www.youtube.com/watch?v=dQw4w9WgXcQ")])
+      NDEF.encodeMessage([NDEF.uriRecord(url)])
     ),
   ]);
   // fill in the total size of NDEF

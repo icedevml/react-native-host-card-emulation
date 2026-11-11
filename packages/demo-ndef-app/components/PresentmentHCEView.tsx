@@ -1,11 +1,13 @@
 import React from 'react';
-import { Alert, AppState, Button, StyleSheet, Text } from 'react-native';
+import { Alert, AppState, Text } from 'react-native';
 
 import { Buffer } from 'buffer/';
 
 import HCE, { HCESession } from '@icedevml/react-native-host-card-emulation';
 import { createNDEFType4TagApp } from '../ndefType4TagApp.ts';
-import useEventLog from './useEventLog.ts';
+import { logApdu, logEvent } from './eventLog.ts';
+import EventLogView from './EventLogView.tsx';
+import { BackButton, Section, textStyles } from './ui.tsx';
 
 interface IProps {
   setCurrentView: (view: string) => void;
@@ -13,7 +15,6 @@ interface IProps {
 
 function PresentmentHCEView({ setCurrentView }: IProps): React.JSX.Element {
   const [exclusiveNFCAcquired, setExclusiveNFCAcquired] = React.useState(false);
-  const [recentEvents, addEvent] = useEventLog();
   const [getNDEFAppState, resetNDEFAppState, handleCAPDU] = React.useMemo(
     () => createNDEFType4TagApp(),
     [],
@@ -28,6 +29,7 @@ function PresentmentHCEView({ setCurrentView }: IProps): React.JSX.Element {
     const appStateSubscription = AppState.addEventListener('change', nextAppState => {
       if (nextAppState === 'background') {
         HCE.releaseExclusiveNFC();
+        logEvent('HCE.releaseExclusiveNFC()');
         setCurrentView('main');
       }
     });
@@ -35,6 +37,7 @@ function PresentmentHCEView({ setCurrentView }: IProps): React.JSX.Element {
     (async () => {
       try {
         await HCE.acquireExclusiveNFC();
+        logEvent('HCE.acquireExclusiveNFC()');
       } catch (e) {
         if (!controller.signal.aborted) {
           Alert.alert(
@@ -49,6 +52,7 @@ function PresentmentHCEView({ setCurrentView }: IProps): React.JSX.Element {
 
       if (controller.signal.aborted) {
         HCE.releaseExclusiveNFC();
+        logEvent('HCE.releaseExclusiveNFC()');
         return;
       }
 
@@ -68,7 +72,9 @@ function PresentmentHCEView({ setCurrentView }: IProps): React.JSX.Element {
         session = await HCE.beginSession(
           {
             onApdu: apdu => {
-              const response = handleCAPDU(Buffer.from(apdu.command));
+              const command = Buffer.from(apdu.command);
+              const response = handleCAPDU(command);
+              logApdu(command, response);
 
               if (getNDEFAppState().wasNDEFRead) {
                 session?.setAlertMessage('Done. Untap smartphone from the reader.');
@@ -78,28 +84,31 @@ function PresentmentHCEView({ setCurrentView }: IProps): React.JSX.Element {
             },
             // start HCE whenever the reader is detected, without any user interaction
             onReaderDetected: async () => {
-              addEvent('readerDetected');
+              logEvent('onReaderDetected()');
               hceTriggered = true;
               resetNDEFAppState();
               session?.setAlertMessage('Detected reader.');
               await session?.startEmulation();
+              logEvent('HCESession.startEmulation()');
             },
             // stop it with success whenever NDEF was read
             onReaderLost: async () => {
-              addEvent('readerLost');
+              logEvent('onReaderLost()');
 
               if (getNDEFAppState().wasNDEFRead && (await session?.isEmulationRunning())) {
                 await session?.stopEmulation('success');
+                logEvent('HCESession.stopEmulation(success)');
                 hceTriggered = false;
               }
             },
             onInvalidated: reason => {
-              addEvent('invalidated ' + reason);
+              logEvent(`onInvalidated(${reason})`);
               setCurrentView('main');
             },
           },
           { signal: controller.signal },
         );
+        logEvent('HCE.beginSession()');
       } catch (e) {
         if (!controller.signal.aborted) {
           Alert.alert('Error', 'Failed to begin NFC session: ' + e);
@@ -117,47 +126,30 @@ function PresentmentHCEView({ setCurrentView }: IProps): React.JSX.Element {
       }
 
       HCE.releaseExclusiveNFC();
+      logEvent('HCE.releaseExclusiveNFC()');
     };
-  }, [addEvent, getNDEFAppState, resetNDEFAppState, handleCAPDU, setCurrentView]);
+  }, [getNDEFAppState, resetNDEFAppState, handleCAPDU, setCurrentView]);
 
   if (!exclusiveNFCAcquired) {
-    return <Text style={styles.text}>Please wait...</Text>;
+    return <Text style={textStyles.body}>Please wait...</Text>;
   }
 
   return (
     <>
-      <Button
-        title="Back to main menu"
-        onPress={() => setCurrentView('main')}
-      />
-      <Text style={styles.headerText}>
-        HCE interaction with Presentment Intent (iOS)
-      </Text>
-      <Text style={styles.text}>
-        Exclusive NFC access was acquired for 15 seconds. Tap the smartphone to
-        the reader.
-      </Text>
-      <Text style={styles.text}>
-        The HCE interaction will start automatically after the reader field is
-        detected.
-      </Text>
-      <Text style={styles.text}>{recentEvents}</Text>
+      <BackButton onPress={() => setCurrentView('main')} />
+      <Section title="HCE interaction with Presentment Intent (iOS)">
+        <Text style={textStyles.body}>
+          Exclusive NFC access was acquired for 15 seconds. Tap the smartphone
+          to the reader.
+        </Text>
+        <Text style={textStyles.hint}>
+          The HCE interaction will start automatically after the reader field
+          is detected.
+        </Text>
+      </Section>
+      <EventLogView />
     </>
   );
 }
-
-const styles = StyleSheet.create({
-  text: {
-    margin: 10,
-    fontSize: 20,
-    color: 'black',
-  },
-  headerText: {
-    margin: 10,
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: 'black',
-  },
-});
 
 export default PresentmentHCEView;

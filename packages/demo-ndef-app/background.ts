@@ -2,6 +2,7 @@ import { Buffer } from 'buffer/';
 
 import type { BackgroundHandlerFactory } from '@icedevml/react-native-host-card-emulation';
 import { createNDEFType4TagApp } from './ndefType4TagApp.ts';
+import { logApdu, logEvent } from './components/eventLog.ts';
 
 /*
  Called once per interaction with the reader, so the NDEF tag state is never shared between
@@ -9,13 +10,17 @@ import { createNDEFType4TagApp } from './ndefType4TagApp.ts';
  */
 const createBackgroundHandler: BackgroundHandlerFactory = ({ sessionId, appState }) => {
   const [_getNDEFAppState, _resetNDEFAppState, handleCAPDU] = createNDEFType4TagApp();
-  console.log('background HCE interaction started', sessionId, appState);
+  logEvent(`BackgroundHandlerFactory(${sessionId.slice(0, 8)}, ${appState})`, 'bg');
 
   return {
-    onApdu: apdu => handleCAPDU(Buffer.from(apdu.command)),
-    onReaderLost: () => {
-      console.log('background HCE interaction finished', sessionId);
+    onApdu: apdu => {
+      const command = Buffer.from(apdu.command);
+      const response = handleCAPDU(command);
+      logApdu(command, response, 'bg');
+      return response;
     },
+    onReaderLost: () => logEvent('onReaderLost()', 'bg'),
+    onError: error => logEvent(`onError(${error})`, 'bg'),
   };
 };
 
