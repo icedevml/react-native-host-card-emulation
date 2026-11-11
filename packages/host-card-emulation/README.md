@@ -292,6 +292,12 @@ Routing rules on Android:
 2. Otherwise, the background handler handles the interaction.
 3. If there is no background handler, the reader receives an error status word.
 
+Call `HCE.unregisterBackgroundHandler()` to temporarily stop handling interactions in background (e.g. on a screen
+where the HCE should only work after the user explicitly started it) and `HCE.registerBackgroundHandler()` to resume.
+
+While React Native is starting (e.g. the app wasn't running), the interaction is held until the entry file
+has been evaluated, so that the background handler registered there is used.
+
 The decision is made when the reader selects the application and it doesn't change until the reader is lost. If the interaction
 was rejected, the reader may re-select the application later (e.g. after you have started the emulation) and it will be routed again.
 

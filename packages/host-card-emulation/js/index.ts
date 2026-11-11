@@ -1,5 +1,5 @@
 import NativeHCEModule from './NativeHCEModule';
-import {registerBackgroundHandler} from './background';
+import {registerBackgroundHandler, unregisterBackgroundHandler} from './background';
 import {bytesToHex, HCEError, hexToBytes} from './internal';
 import {beginSession} from './session';
 import type {HCECapabilities, HCEPlatform} from './types';
@@ -24,6 +24,7 @@ export const HCE = {
   getCapabilities,
   beginSession,
   registerBackgroundHandler,
+  unregisterBackgroundHandler,
 
   /**
    * iOS: Acquire NFCPresentmentIntentAssertion (exclusive NFC access for a limited time).

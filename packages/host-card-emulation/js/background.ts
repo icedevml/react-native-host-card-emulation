@@ -10,6 +10,19 @@ const BACKGROUND_TASK_KEY = 'handleBackgroundHCECall';
 let currentFactory: BackgroundHandlerFactory | null = null;
 let taskRegistered = false;
 
+if (Platform.OS === 'android') {
+  /*
+   Until the JS side declares whether it has a background handler, the native side holds the
+   interactions instead of rejecting them, as React Native might still be evaluating the bundle.
+   The handler is registered at the top level of the entry file, so the timer fires after that.
+   */
+  setTimeout(() => {
+    if (!taskRegistered) {
+      NativeHCEModule.setBackgroundHandlerRegistered(false);
+    }
+  }, 0);
+}
+
 interface BackgroundTaskData {
   sessionId?: string;
   appState?: string;
@@ -111,4 +124,18 @@ export function registerBackgroundHandler(factory: BackgroundHandlerFactory): vo
   }
 
   NativeHCEModule.setBackgroundHandlerRegistered(true);
+}
+
+/**
+ * Android: Stop handling interactions in background, until registerBackgroundHandler() is called again.
+ * The readers then receive an error status word unless there is a session with running emulation.
+ * Interactions that have already started are served until the reader is lost. No-op on iOS.
+ */
+export function unregisterBackgroundHandler(): void {
+  if (Platform.OS !== 'android') {
+    return;
+  }
+
+  currentFactory = null;
+  NativeHCEModule.setBackgroundHandlerRegistered(false);
 }

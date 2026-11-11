@@ -74,6 +74,8 @@ final class HCEManager {
         RTNHCEAndroidModule module;
         // whether the JS side is listening for the events of this activation
         boolean ready;
+        // whether the activation waits for the JS side to declare whether it has a background handler
+        boolean awaitingJs;
         int taskId = -1;
 
         long pendingApduId;
@@ -217,16 +219,7 @@ final class HCEManager {
         ReactContext reactContext = reactHost.getCurrentReactContext();
 
         if (reactContext != null) {
-            RTNHCEAndroidModule module = getModule(reactContext);
-
-            if (module == null || !module.isBackgroundHandlerRegistered()) {
-                Log.d(TAG, "startActivation: no session and no background handler, rejecting");
-                a.target = Target.REJECTED;
-                return a;
-            }
-
-            Log.d(TAG, "startActivation: background handler " + a.sessionId);
-            startBackgroundTask(a, module, reactContext);
+            routeToBackgroundHandler(a, getModule(reactContext), reactContext);
         } else {
             Log.d(TAG, "startActivation: starting React Native for background handler " + a.sessionId);
             final Activation pendingActivation = a;
@@ -251,13 +244,33 @@ final class HCEManager {
             return;
         }
 
-        RTNHCEAndroidModule module = getModule(reactContext);
+        routeToBackgroundHandler(a, getModule(reactContext), reactContext);
+    }
 
-        if (module == null) {
+    /**
+     * The React context exists before the JS bundle is evaluated, so the module (or the JS side's
+     * declaration of the background handler) might not be there yet. In such case, the activation
+     * holds the C-APDU until onBackgroundHandlerDeclared() or the reader is lost.
+     */
+    // must be called on the main thread
+    private void routeToBackgroundHandler(Activation a, @Nullable RTNHCEAndroidModule module, ReactContext reactContext) {
+        Boolean registered = module != null ? module.getBackgroundHandlerRegistered() : null;
+
+        if (registered == null) {
+            Log.d(TAG, "routeToBackgroundHandler: waiting for the JS side " + a.sessionId);
+            a.awaitingJs = true;
+            return;
+        }
+
+        a.awaitingJs = false;
+
+        if (!registered) {
+            Log.d(TAG, "routeToBackgroundHandler: no session and no background handler, rejecting");
             rejectActivation(a);
             return;
         }
 
+        Log.d(TAG, "routeToBackgroundHandler: background handler " + a.sessionId);
         startBackgroundTask(a, module, reactContext);
     }
 
@@ -383,6 +396,15 @@ final class HCEManager {
         if (a != null && a.target == Target.SESSION && fg.id.equals(a.sessionId)) {
             a.module.emitEvent(a.sessionId, "readerLost");
             rejectActivation(a);
+        }
+    }
+
+    // main thread
+    synchronized void onBackgroundHandlerDeclared(RTNHCEAndroidModule module) {
+        Activation a = activation;
+
+        if (a != null && a.target == Target.BACKGROUND && a.awaitingJs) {
+            routeToBackgroundHandler(a, module, module.getContext());
         }
     }
 

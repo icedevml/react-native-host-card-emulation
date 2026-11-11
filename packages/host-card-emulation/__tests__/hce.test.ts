@@ -267,4 +267,46 @@ describe('background handler', () => {
 
     expect(mockNative.backgroundSessionReady).not.toHaveBeenCalled();
   });
+
+  it('can be unregistered and registered again', () => {
+    const {HCE} = require('../js') as typeof import('../js');
+    const factory = () => ({onApdu: () => [0x90, 0x00]});
+
+    HCE.registerBackgroundHandler(factory);
+    HCE.unregisterBackgroundHandler();
+    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenLastCalledWith(false);
+
+    HCE.registerBackgroundHandler(factory);
+    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenLastCalledWith(true);
+  });
+});
+
+describe('background handler declaration', () => {
+  const nextTick = () => new Promise<void>(resolve => setTimeout(resolve, 0));
+
+  function loadIsolated(entry: (hce: typeof import('../js').HCE) => void) {
+    jest.isolateModules(() => {
+      const {AppRegistry, Platform} = require('react-native');
+      Platform.OS = 'android';
+      jest.spyOn(AppRegistry, 'registerHeadlessTask').mockImplementation(() => {});
+      entry((require('../js') as typeof import('../js')).HCE);
+    });
+  }
+
+  it('declares that there is no background handler once the entry file was evaluated', async () => {
+    loadIsolated(() => {});
+    expect(mockNative.setBackgroundHandlerRegistered).not.toHaveBeenCalled();
+
+    await nextTick();
+
+    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenCalledTimes(1);
+    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenCalledWith(false);
+  });
+
+  it('only declares the handler registered by the entry file', async () => {
+    loadIsolated(HCE => HCE.registerBackgroundHandler(() => ({onApdu: () => [0x90, 0x00]})));
+    await nextTick();
+
+    expect(mockNative.setBackgroundHandlerRegistered.mock.calls).toEqual([[true]]);
+  });
 });

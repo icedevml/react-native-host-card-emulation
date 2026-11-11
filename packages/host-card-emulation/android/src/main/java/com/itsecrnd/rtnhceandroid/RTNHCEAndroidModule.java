@@ -5,10 +5,12 @@ import android.nfc.NfcAdapter;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
+import com.facebook.react.bridge.UiThreadUtil;
 import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.jstasks.HeadlessJsTaskContext;
 import com.facebook.react.jstasks.HeadlessJsTaskEventListener;
@@ -17,7 +19,8 @@ public class RTNHCEAndroidModule extends NativeHCEModuleSpec {
     public static final String TAG = "RTNHCEAndroidModule";
     public static final String NAME = "NativeHCEModule";
 
-    private volatile boolean backgroundHandlerRegistered;
+    // null until the JS side declares whether it has a background handler
+    private volatile Boolean backgroundHandlerRegistered;
 
     private final HeadlessJsTaskEventListener headlessJsTaskEventListener = new HeadlessJsTaskEventListener() {
         @Override
@@ -54,7 +57,8 @@ public class RTNHCEAndroidModule extends NativeHCEModuleSpec {
         return getReactApplicationContext();
     }
 
-    boolean isBackgroundHandlerRegistered() {
+    @Nullable
+    Boolean getBackgroundHandlerRegistered() {
         return backgroundHandlerRegistered;
     }
 
@@ -207,6 +211,7 @@ public class RTNHCEAndroidModule extends NativeHCEModuleSpec {
     @Override
     public void setBackgroundHandlerRegistered(boolean registered) {
         this.backgroundHandlerRegistered = registered;
+        UiThreadUtil.runOnUiThread(() -> HCEManager.getInstance().onBackgroundHandlerDeclared(this));
     }
 
     @Override
