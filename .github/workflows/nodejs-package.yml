@@ -45,6 +45,10 @@ jobs:
       - run: npm install -g corepack@0.36.0
       - run: corepack enable
       - run: yarn install --immutable
+      # Published with npm, as `yarn npm publish --provenance` calls Sigstore with its default 5 s
+      # timeout: a slow Rekor response is retried and the retry fails with 409 (the entry already
+      # exists). npm passes its fetch-timeout (5 min) to Sigstore.
       - run: |
           cd packages/host-card-emulation
-          yarn npm publish --provenance --access public
+          yarn pack --out package.tgz
+          npm publish package.tgz --provenance --access public
