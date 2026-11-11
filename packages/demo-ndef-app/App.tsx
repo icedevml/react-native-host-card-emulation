@@ -25,7 +25,7 @@ function App(): React.JSX.Element {
 
   return (
     <SafeAreaProvider>
-      <StatusBar barStyle="dark-content" backgroundColor={colors.surface} />
+      <StatusBar barStyle="dark-content" />
       <SafeAreaView style={styles.safeAreaView}>
         <View style={styles.header}>
           <Text style={styles.title}>HCE Module Demo</Text>
@@ -42,7 +42,8 @@ function App(): React.JSX.Element {
 const styles = StyleSheet.create({
   safeAreaView: {
     flex: 1,
-    backgroundColor: colors.background,
+    // edge-to-edge: the system bars are drawn over the insets, matching the header
+    backgroundColor: colors.surface,
   },
   header: {
     backgroundColor: colors.surface,
@@ -63,6 +64,7 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
+    backgroundColor: colors.background,
     padding: 16,
     gap: 12,
   },

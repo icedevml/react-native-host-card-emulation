@@ -4,6 +4,7 @@ import {
   NativeSyntheticEvent,
   Pressable,
   ScrollView,
+  ScrollViewInstance,
   StyleSheet,
   Text,
   View,
@@ -43,7 +44,7 @@ function LogLine({ entry }: { entry: LogEntry }) {
  */
 function EventLogView() {
   const entries = useEventLog();
-  const scrollRef = React.useRef<ScrollView>(null);
+  const scrollRef = React.useRef<ScrollViewInstance>(null);
   const stickToBottom = React.useRef(true);
   const viewportHeight = React.useRef(0);
   const contentHeight = React.useRef(0);
