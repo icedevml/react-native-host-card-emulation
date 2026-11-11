@@ -11,9 +11,16 @@ import { logApdu, logEvent } from './components/eventLog.ts';
 const createBackgroundHandler: BackgroundHandlerFactory = ({ sessionId, appState }) => {
   const [_getNDEFAppState, _resetNDEFAppState, handleCAPDU] = createNDEFType4TagApp();
   logEvent(`BackgroundHandlerFactory(${sessionId.slice(0, 8)}, ${appState})`, 'bg');
+  let deviceLocked: boolean | null = null;
 
   return {
     onApdu: apdu => {
+      // only log the lock state of the first C-APDU and its changes
+      if (apdu.deviceLocked !== deviceLocked) {
+        deviceLocked = apdu.deviceLocked;
+        logEvent(`deviceLocked=${deviceLocked}`, 'bg');
+      }
+
       const command = Buffer.from(apdu.command);
       const response = handleCAPDU(command);
       logApdu(command, response, 'bg');
