@@ -1,4 +1,4 @@
-package com.demohcemoduleiosapp
+package com.itsecrnd.nfctype4tagemulator
 
 import android.app.Application
 import com.facebook.react.PackageList

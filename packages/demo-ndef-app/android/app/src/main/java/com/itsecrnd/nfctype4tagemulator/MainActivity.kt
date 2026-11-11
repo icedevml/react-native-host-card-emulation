@@ -1,4 +1,4 @@
-package com.demohcemoduleiosapp
+package com.itsecrnd.nfctype4tagemulator
 
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate

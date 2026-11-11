@@ -79,9 +79,9 @@ android {
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
 
-    namespace "com.demohcemoduleiosapp"
+    namespace "com.itsecrnd.nfctype4tagemulator"
     defaultConfig {
-        applicationId "com.demohcemoduleiosapp"
+        applicationId "com.itsecrnd.nfctype4tagemulator"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
