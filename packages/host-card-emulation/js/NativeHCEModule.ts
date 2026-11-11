@@ -47,7 +47,7 @@ export type NativeHCECapabilities = {
 export interface Spec extends TurboModule {
   getCapabilities(): Promise<NativeHCECapabilities>;
 
-  beginSession(sessionId: string): Promise<void>;
+  beginSession(sessionId: string, allowWhenLocked: boolean): Promise<void>;
   invalidateSession(sessionId: string): void;
   setSessionAlertMessage(sessionId: string, message: string): void;
 
@@ -61,7 +61,7 @@ export interface Spec extends TurboModule {
   releaseExclusiveNFC(): void;
   isExclusiveNFC(): boolean;
 
-  setBackgroundHandlerRegistered(registered: boolean): void;
+  setBackgroundHandlerRegistered(registered: boolean, allowWhenLocked: boolean): void;
   backgroundSessionReady(sessionId: string): boolean;
 
   readonly onEvent: CodegenTypes.EventEmitter<NativeHCEEvent>;

@@ -20,9 +20,9 @@ let reactHeaders: [Target.Dependency] = [
 
 let package = Package(
     name: "ReactNativeHostCardEmulation",
-    // Must not exceed RN's generated Autolinked aggregate (iOS 15.0). HCE itself requires iOS 17.4,
-    // which is checked at runtime.
-    platforms: [.iOS(.v15)],
+    // React Native's minimum, the generated Autolinked aggregate never targets a lower version.
+    // HCE itself requires iOS 17.4, which is checked at runtime.
+    platforms: [.iOS("15.1")],
     products: [
         .library(name: "ReactNativeHostCardEmulation", targets: ["ReactNativeHostCardEmulationSwift", "ReactNativeHostCardEmulationObjC"]),
     ],

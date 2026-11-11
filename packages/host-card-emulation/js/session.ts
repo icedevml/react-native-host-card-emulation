@@ -1,5 +1,13 @@
 import NativeHCEModule, {NativeHCEEvent} from './NativeHCEModule';
-import {addSessionListener, HCEError, processApdu, reportError, SerialQueue} from './internal';
+import {
+  addSessionListener,
+  callHandler,
+  HCEError,
+  processApdu,
+  reportError,
+  resolveHandlerOptions,
+  SerialQueue,
+} from './internal';
 import type {BeginSessionOptions, EmulationStopStatus, HCESession, SessionHandlers} from './types';
 
 let sessionCounter = 0;
@@ -15,6 +23,7 @@ class Session implements HCESession {
   readonly started: Promise<void>;
 
   private readonly handlers: SessionHandlers;
+  private readonly handlerTimeout: number;
   private readonly queue = new SerialQueue();
   private readonly removeListener: () => void;
   private active = true;
@@ -23,9 +32,10 @@ class Session implements HCESession {
   private resolveStarted!: () => void;
   private rejectStarted!: (error: Error) => void;
 
-  constructor(id: string, handlers: SessionHandlers) {
+  constructor(id: string, handlers: SessionHandlers, handlerTimeout: number) {
     this.id = id;
     this.handlers = handlers;
+    this.handlerTimeout = handlerTimeout;
     this.closed = new Promise(resolve => {
       this.resolveClosed = resolve;
     });
@@ -43,12 +53,14 @@ class Session implements HCESession {
     return this.active;
   }
 
-  private runHandler(handler: (() => unknown) | undefined) {
+  private runHandler(name: string, handler: (() => unknown) | undefined) {
     if (!handler) {
       return;
     }
 
-    this.queue.push(handler).catch(e => reportError(this.handlers.onError, e));
+    this.queue
+      .push(() => callHandler(name, handler, this.handlerTimeout))
+      .catch(e => reportError(this.handlers.onError, e));
   }
 
   private handleEvent(event: NativeHCEEvent) {
@@ -59,15 +71,17 @@ class Session implements HCESession {
         break;
 
       case 'readerDetected':
-        this.runHandler(this.handlers.onReaderDetected);
+        this.runHandler('onReaderDetected()', this.handlers.onReaderDetected);
         break;
 
       case 'readerLost':
-        this.runHandler(this.handlers.onReaderLost);
+        this.runHandler('onReaderLost()', this.handlers.onReaderLost);
         break;
 
       case 'apdu':
-        this.queue.push(() => processApdu(this.id, event, this.handlers.onApdu, this.handlers.onError));
+        this.queue.push(() =>
+          processApdu(this.id, event, this.handlers.onApdu, this.handlers.onError, this.handlerTimeout),
+        );
         break;
 
       case 'sessionInvalidated':
@@ -89,7 +103,7 @@ class Session implements HCESession {
       this.rejectStarted(new HCEError('err_session_invalidated', `The session was invalidated: ${reason}`));
     } else {
       const onInvalidated = this.handlers.onInvalidated;
-      this.runHandler(onInvalidated ? () => onInvalidated(reason) : undefined);
+      this.runHandler('onInvalidated()', onInvalidated ? () => onInvalidated(reason) : undefined);
     }
 
     this.resolveClosed(reason);
@@ -146,18 +160,19 @@ export async function beginSession(handlers: SessionHandlers, options: BeginSess
   }
 
   const {signal} = options;
+  const {handlerTimeout, allowWhenLocked} = resolveHandlerOptions(options);
 
   if (signal?.aborted) {
     throw new HCEError('err_aborted', 'The operation was aborted.');
   }
 
-  const session = new Session(generateSessionId(), handlers);
+  const session = new Session(generateSessionId(), handlers, handlerTimeout);
   const onAbort = () => session.invalidate();
   signal?.addEventListener('abort', onAbort);
   session.closed.then(() => signal?.removeEventListener('abort', onAbort));
 
   try {
-    await NativeHCEModule.beginSession(session.id);
+    await NativeHCEModule.beginSession(session.id, allowWhenLocked);
   } catch (e) {
     session.close('beginSessionFailed');
     throw e;

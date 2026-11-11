@@ -117,9 +117,10 @@ Afterwards, follow the subsections below for each platform that you need to supp
    ```
    Replace `F001020304`, `F00102030405`, `F0010203040506` with the ISO7816 AIDs that you want to support.
 
-   Keep `android:requireDeviceUnlock` set to `false` in any scenario, this is the way to avoid having system prompts
-   displayed by Android whenever the app is interacted with when the phone is locked. Every C-APDU delivered to your
-   handler carries the `deviceLocked` flag, which lets you decide whether you want to allow the NFC interaction or not.
+   Always keep `android:requireDeviceUnlock` set to `false`. With `true`, Android displays its own native prompts
+   whenever a reader is tapped while the phone is locked (e.g. "unlock the phone to complete the payment"), which
+   confuses the users, especially if your app isn't related to payments. Control the lock screen behavior with
+   the `allowWhenLocked` option instead (see [Interactions while the device is locked](#android-interactions-while-the-device-is-locked)).
 
    For `android:requireDeviceScreenOn` - set it according to your use case.
 
@@ -138,7 +139,15 @@ sends it. If the handler throws an exception or returns an invalid response, the
 as a reply to a different command.
 
 All the handlers of a given session are called sequentially - the next event is never delivered before the handler
-of the previous one has finished (including the returned promise).
+of the previous one has finished (including the returned promise). A handler that doesn't finish within the handler
+timeout (10 seconds by default) is abandoned: its result is ignored, `onError` receives an `err_handler_timeout` error
+and the next event is delivered (a timed out `onApdu` is responded to with `6F00`). This way, a single stuck promise
+can't block the session or the background interaction forever.
+
+> [!WARNING]
+> Don't log the APDUs in production apps. On Android, `console.log()` ends up in the system log (logcat) also in release
+> builds, and the APDUs might carry sensitive data (tokens, credentials, personal data). The demo app does log them,
+> but only for the demo purposes.
 
 See [Source Code for Demo Application: NDEF NFC Type 4 Tag Emulator (for iOS/Android)](https://github.com/icedevml/react-native-host-card-emulation/tree/master/packages/demo-ndef-app) for a complete example.
 
@@ -179,6 +188,15 @@ const caps = await HCE.getCapabilities();
    `beginSession()` resolves once the session is started and ready for `startEmulation()`. Only a single session can be
    active at a time, `beginSession()` rejects with `err_session_exists` otherwise.
 
+   The optional second argument accepts:
+   ```typescript
+   await HCE.beginSession(handlers, {
+       signal,                  // AbortSignal, aborting it invalidates the session (see below)
+       handlerTimeout: 10000,   // ms, the default; 0 or Infinity disables the timeout
+       allowWhenLocked: true,   // Android: the default; see "Interactions while the device is locked"
+   });
+   ```
+
    Calling `await session.startEmulation()` causes:
    * iOS: Your smartphone will start listening for C-APDUs (Command APDUs originating from reader devices) right after that function is called, which will be additionally indicated by the operating system popping out the NFC scanning user interface prompt.
    * Android: C-APDUs will be forwarded to this session from that point on. No specific user interface is displayed (you have to implement it on your own, within your app).
@@ -218,15 +236,28 @@ For the reader-related handlers, trigger mechanisms are platform dependent:
 
 The `deviceLocked` flag of each C-APDU:
 * iOS: Always `false` - it's impossible to communicate over HCE while the device is locked.
-* Android: Sampled when the C-APDU arrives. C-APDUs are always forwarded - it is up to you to decide how to treat a locked device.
+* Android: Sampled when the C-APDU arrives. Always `false` on devices without a secure lock screen (PIN, pattern, password, biometrics).
+
+#### Android: Interactions while the device is locked
+
+By default (`allowWhenLocked: true`), the C-APDUs are delivered to your handlers also while the device is locked
+and it's up to you to decide what to do based on the `deviceLocked` flag.
+
+> [!IMPORTANT]
+> If your app isn't meant to be used on the lock screen, pass `allowWhenLocked: false` to both `HCE.beginSession()`
+> and `HCE.registerBackgroundHandler()`. The C-APDUs received while the device is locked are then rejected by the native
+> side (see the status words below) and never reach your JS code - in background, not even the handler factory is called.
+> Remember that with the background handler, anybody who is able to tap a reader to the locked phone can interact with your app.
+
+Keep `android:requireDeviceUnlock="false"` in `aid_list.xml` regardless of this option (see [Installation](#installation)).
 
 #### Status words sent by the library
 
 | Situation | Status word |
 |---|---|
 | The handler has thrown an exception or returned an invalid response | `6F00` (no precise diagnosis) |
-| Android: nobody can handle the interaction, response to SELECT | `6A82` (file or application not found) |
-| Android: nobody can handle the interaction, response to other commands | `6985` (conditions of use not satisfied) |
+| Android: nobody can handle the interaction (or the device is locked with `allowWhenLocked: false`), response to SELECT | `6A82` (file or application not found) |
+| Android: nobody can handle the interaction (or the device is locked with `allowWhenLocked: false`), response to other commands | `6985` (conditions of use not satisfied) |
 
 ### iOS: Acquiring exclusive NFC access
 
@@ -284,11 +315,18 @@ HCE.registerBackgroundHandler(({ sessionId, appState }) => {
 AppRegistry.registerComponent(appName, () => App);
 ```
 
+`registerBackgroundHandler()` accepts the same `handlerTimeout` and `allowWhenLocked` options as `beginSession()`
+as the second argument, e.g. `HCE.registerBackgroundHandler(factory, { allowWhenLocked: false })`.
+
 The factory may also return a promise (e.g. to load some state from the storage) - the C-APDUs are held by the library
-until it resolves. If no background handler is registered, the reader receives an error status word (see the table above).
+until it resolves. The handler timeout applies to the factory as well: if it throws or doesn't finish in time,
+the reader receives an error status word for the rest of the interaction. If no background handler is registered,
+the reader receives an error status word (see the table above).
 
 Routing rules on Android:
 1. If there is a session with running emulation, it handles the interaction (also when the app went to background in the meantime - stop the emulation on `AppState` change if you don't want that).
+   While the app's activity is resumed, the library also makes `HCEService` the preferred service (`CardEmulation.setPreferredService()`),
+   so that the session wins over other apps that have registered the same AIDs. In background, such conflicts are resolved by Android.
 2. Otherwise, the background handler handles the interaction.
 3. If there is no background handler, the reader receives an error status word.
 
@@ -296,7 +334,8 @@ Call `HCE.unregisterBackgroundHandler()` to temporarily stop handling interactio
 where the HCE should only work after the user explicitly started it) and `HCE.registerBackgroundHandler()` to resume.
 
 While React Native is starting (e.g. the app wasn't running), the interaction is held until the entry file
-has been evaluated, so that the background handler registered there is used.
+has been evaluated, so that the background handler registered there is used. If that doesn't happen within 15 seconds
+(e.g. the JS bundle has crashed), the interaction is rejected.
 
 The decision is made when the reader selects the application and it doesn't change until the reader is lost. If the interaction
 was rejected, the reader may re-select the application later (e.g. after you have started the emulation) and it will be routed again.
@@ -308,6 +347,8 @@ Promises returned by the library reject with errors having a `code` property:
 | Code | Meaning |
 |---|---|
 | `err_platform_unsupported` | The device or the OS doesn't support the requested feature. |
+| `err_invalid_argument` | Invalid handlers or options were passed. |
+| `err_handler_timeout` | Passed to `onError`: a handler hasn't finished within the handler timeout. |
 | `err_session_exists` | Another session is already active. |
 | `err_no_session` | The session is not active anymore. |
 | `err_session_invalidated` | The session was invalidated while it was being started. |

@@ -54,8 +54,9 @@ export type EmulationStopStatus = 'success' | 'failure';
 export interface SessionHandlers {
   /**
    * Handle the C-APDU and return the R-APDU. Called sequentially, the next C-APDU is never
-   * delivered before the previous call has finished. If the handler throws or returns an invalid
-   * response, the reader receives the 6F00 status word (no precise diagnosis).
+   * delivered before the previous call has finished. If the handler throws, returns an invalid
+   * response or doesn't finish within the handler timeout, the reader receives the 6F00 status word
+   * (no precise diagnosis).
    */
   onApdu: ApduHandler;
   /**
@@ -72,18 +73,44 @@ export interface SessionHandlers {
    */
   onInvalidated?: (reason: string) => void;
   /**
-   * Errors thrown by the handlers above or by responding to a C-APDU.
-   * Logged with console.warn() if not provided.
+   * Errors thrown by the handlers above (including the err_handler_timeout errors)
+   * or by responding to a C-APDU. Logged with console.warn() if not provided.
    */
   onError?: (error: unknown) => void;
 }
 
-export interface BeginSessionOptions {
+export interface HandlerOptions {
+  /**
+   * The maximum time (in milliseconds) a single handler call may take, including the returned promise.
+   * Once it's exceeded, the handler's result is ignored, onError() receives an err_handler_timeout error
+   * and the next event is delivered (a timed out onApdu() is responded to with the 6F00 status word).
+   * Without the limit, a handler that never finishes would block all the subsequent events.
+   *
+   * Default: 10000. Pass 0 or Infinity to disable the timeout.
+   */
+  handlerTimeout?: number;
+  /**
+   * Android: Whether the interaction is allowed while the device is locked. If false, the C-APDUs
+   * received while the device is locked are never delivered to the handlers and the reader receives
+   * an error status word instead. Set it to false unless the app is meant to work on the lock screen.
+   * iOS: Ignored, it's impossible to communicate over HCE while the device is locked.
+   *
+   * Default: true.
+   */
+  allowWhenLocked?: boolean;
+}
+
+export interface BeginSessionOptions extends HandlerOptions {
   /**
    * Aborting the signal invalidates the session, also if it's still being started.
    */
   signal?: AbortSignal;
 }
+
+/**
+ * The options of the background handler, handlerTimeout also applies to the factory.
+ */
+export type BackgroundHandlerOptions = HandlerOptions;
 
 export interface HCESession {
   readonly id: string;
@@ -144,7 +171,8 @@ export interface BackgroundHandlers {
 
 /**
  * Called once per interaction with the reader, so the returned handlers can safely keep
- * the state of that interaction in a closure.
+ * the state of that interaction in a closure. If it throws or doesn't finish within the handler
+ * timeout, the reader receives an error status word for the rest of the interaction.
  */
 export type BackgroundHandlerFactory = (
   context: BackgroundContext,

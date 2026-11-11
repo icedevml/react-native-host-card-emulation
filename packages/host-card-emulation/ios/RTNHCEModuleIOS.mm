@@ -91,7 +91,8 @@ static NSString *const kUnsupportedMessage = @"This iOS version does not support
     return @NO;
 }
 
-- (void)beginSession:(nonnull NSString *)sessionId resolve:(nonnull RCTPromiseResolveBlock)resolve reject:(nonnull RCTPromiseRejectBlock)reject {
+// allowWhenLocked is ignored, it's impossible to communicate over HCE while the device is locked
+- (void)beginSession:(nonnull NSString *)sessionId allowWhenLocked:(BOOL)allowWhenLocked resolve:(nonnull RCTPromiseResolveBlock)resolve reject:(nonnull RCTPromiseRejectBlock)reject {
     if (@available(iOS 17.4, *)) {
         [hcemoduleios beginSessionWithSessionId:sessionId resolve:resolve reject:reject];
     } else {
@@ -143,7 +144,7 @@ static NSString *const kUnsupportedMessage = @"This iOS version does not support
     }
 }
 
-- (void)setBackgroundHandlerRegistered:(BOOL)registered {
+- (void)setBackgroundHandlerRegistered:(BOOL)registered allowWhenLocked:(BOOL)allowWhenLocked {
     // background HCE is not supported on iOS, no-op
 }
 

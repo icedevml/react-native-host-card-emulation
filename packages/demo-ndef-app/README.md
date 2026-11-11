@@ -34,3 +34,10 @@ The emulated NDEF tag is recognized out of the box when it's scanned by another 
     yarn start
     ```
 2. (iOS) Press the "Run" button in XCode.
+
+## Logging
+
+> [!WARNING]
+> For the demo purposes, the app logs every C-APDU and R-APDU with `console.log()` (see `components/eventLog.ts`),
+> which ends up in the system log (logcat on Android) also in release builds. Don't copy that into production apps:
+> APDUs might carry sensitive data (tokens, credentials, personal data) readable by anyone with access to the device logs.

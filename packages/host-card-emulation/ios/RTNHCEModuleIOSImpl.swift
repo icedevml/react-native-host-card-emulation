@@ -60,6 +60,15 @@ enum HexCoding {
     let apdu: CardSession.APDU
   }
 
+  private struct EmulationStart {
+    let sessionId: String
+    let task: Task<Void, Error>
+  }
+
+  // how long beginSession() waits for the previous CardSession to end
+  private static let previousSessionEndTimeout: UInt64 = 5_000_000_000
+  private static let previousSessionPollInterval: UInt64 = 50_000_000
+
   /*
    All the mutable state below is guarded by `lock`. It is accessed concurrently from
    the TurboModule method queue, the JS thread (synchronous methods) and the Swift
@@ -72,6 +81,9 @@ enum HexCoding {
   private var startingSessionInvalidateRequested: Bool = false
   private var pendingAPDU: PendingAPDU? = nil
   private var lastAPDUId: Int64 = 0
+  // the number of event loops that are still running, including the ones of invalidated sessions
+  private var runningEventLoops: Int = 0
+  private var emulationStart: EmulationStart? = nil
   private var presentmentIntent: NFCPresentmentIntentAssertion? = nil
   private var presentmentIntentAcquiring: Bool = false
   private var emitOnEvent: ((NSDictionary) -> ())? = nil
@@ -99,6 +111,22 @@ enum HexCoding {
   /// Must be called while holding the lock.
   private func sessionIfCurrent(_ sessionId: String) -> CardSession? {
     return currentSessionId == sessionId ? currentSession : nil
+  }
+
+  /// Only a single CardSession may exist at a time, so wait until the event loops of the previous ones have ended.
+  private func waitForPreviousSessionsToEnd() async -> Bool {
+    var waited: UInt64 = 0
+
+    while synchronized({ self.runningEventLoops > 0 }) {
+      if waited >= Self.previousSessionEndTimeout {
+        return false
+      }
+
+      try? await Task.sleep(nanoseconds: Self.previousSessionPollInterval)
+      waited += Self.previousSessionPollInterval
+    }
+
+    return true
   }
 
   @objc public func setEmitOnEvent(emitOnEvent: @escaping (NSDictionary) -> ()) {
@@ -228,6 +256,13 @@ enum HexCoding {
         return
       }
 
+      // the previous session might still be ending, e.g. if it was invalidated right before this call
+      guard await self.waitForPreviousSessionsToEnd() else {
+        self.synchronized { self.startingSessionId = nil }
+        reject("err_session_exists", "The previous session is still being closed.", nil)
+        return
+      }
+
       let session: CardSession
 
       do {
@@ -240,6 +275,8 @@ enum HexCoding {
 
       let invalidateRequested = self.synchronized { () -> Bool in
         self.startingSessionId = nil
+        // the event loop below runs in both cases
+        self.runningEventLoops += 1
 
         if self.startingSessionInvalidateRequested {
           // invalidateSession() was called while the session was being created
@@ -336,6 +373,8 @@ enum HexCoding {
       session.invalidate()
     }
 
+    // only now a new CardSession can be created
+    synchronized { self.runningEventLoops -= 1 }
     emit(sessionId, "sessionInvalidated", reason: invalidationReason ?? "unknown")
   }
 
@@ -389,24 +428,47 @@ enum HexCoding {
     let sessionId = String(sessionId)
 
     Task.init {
-      guard let session = self.synchronized({ self.sessionIfCurrent(sessionId) }) else {
+      // concurrent calls share a single attempt, so that the emulation is never started twice
+      let task = self.synchronized { () -> Task<Void, Error>? in
+        guard let session = self.sessionIfCurrent(sessionId) else {
+          return nil
+        }
+
+        if let start = self.emulationStart, start.sessionId == sessionId {
+          return start.task
+        }
+
+        let task = Task<Void, Error> {
+          if await session.isEmulationInProgress {
+            return
+          }
+
+          try await session.startEmulation()
+        }
+
+        self.emulationStart = EmulationStart(sessionId: sessionId, task: task)
+        return task
+      }
+
+      guard let task = task else {
         reject("err_no_session", "The session is not active.", nil)
         return
       }
 
-      if await session.isEmulationInProgress {
+      let result = await task.result
+
+      self.synchronized {
+        if self.emulationStart?.task == task {
+          self.emulationStart = nil
+        }
+      }
+
+      switch result {
+      case .success:
         resolve(nil)
-        return
-      }
-
-      do {
-        try await session.startEmulation()
-      } catch (let error) {
+      case .failure(let error):
         reject("err_start_emulation", "Error trying to start emulation. \(error)", nil)
-        return
       }
-
-      resolve(nil)
     }
   }
 
@@ -450,7 +512,12 @@ enum HexCoding {
 
   @objc public func respondApdu(sessionId: NSString, apduId: Double, rapdu: NSString, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
     let sessionId = String(sessionId)
-    let apduId = Int64(apduId)
+
+    // Int64(_:) would crash on NaN, infinity or an out of range value
+    guard let apduId = Int64(exactly: apduId) else {
+      reject("err_invalid_argument", "The APDU identifier must be an integer.", nil)
+      return
+    }
 
     guard let response = HexCoding.decode(String(rapdu)), response.count >= 2 else {
       reject("err_invalid_rapdu", "The R-APDU must be a hex-encoded string of at least 2 bytes.", nil)

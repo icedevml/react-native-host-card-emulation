@@ -38,14 +38,19 @@ function emit(e: NativeHCEEvent) {
 
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));
 
-async function startSession(handlers: Parameters<typeof import('../js').HCE.beginSession>[0]) {
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+async function startSession(
+  handlers: Parameters<typeof import('../js').HCE.beginSession>[0],
+  options?: Parameters<typeof import('../js').HCE.beginSession>[1],
+) {
   const {HCE} = require('../js') as typeof import('../js');
   mockNative.beginSession.mockImplementation((id: string) => {
     // the native side emits sessionStarted asynchronously
     setImmediate(() => emit(event(id, 'sessionStarted')));
     return Promise.resolve();
   });
-  return HCE.beginSession(handlers);
+  return HCE.beginSession(handlers, options);
 }
 
 beforeEach(() => {
@@ -73,7 +78,7 @@ describe('foreground session', () => {
     const onApdu = jest.fn(() => new Uint8Array([0x0a, 0x90, 0x00]));
     const session = await startSession({onApdu});
 
-    expect(mockNative.beginSession).toHaveBeenCalledWith(session.id);
+    expect(mockNative.beginSession).toHaveBeenCalledWith(session.id, true);
 
     emit(event(session.id, 'apdu', {apduId: 7, command: '00A40400', deviceLocked: true}));
     await flush();
@@ -192,6 +197,69 @@ describe('foreground session', () => {
     await expect(HCE.beginSession({onApdu: () => [0x90, 0x00]})).rejects.toBe(error);
   });
 
+  it('responds with 6F00 when onApdu() times out and delivers the next C-APDU', async () => {
+    const onError = jest.fn();
+    const onApdu = jest
+      .fn()
+      .mockImplementationOnce(() => new Promise(() => {}))
+      .mockImplementationOnce(() => [0x90, 0x00]);
+    const session = await startSession({onApdu, onError}, {handlerTimeout: 20});
+
+    emit(event(session.id, 'apdu', {apduId: 1, command: '00'}));
+    emit(event(session.id, 'apdu', {apduId: 2, command: '00'}));
+    await sleep(50);
+
+    expect(mockNative.respondApdu).toHaveBeenNthCalledWith(1, session.id, 1, '6F00');
+    expect(mockNative.respondApdu).toHaveBeenNthCalledWith(2, session.id, 2, '9000');
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({code: 'err_handler_timeout'}));
+    session.invalidate();
+  });
+
+  it('times out the other handlers too, so that they never block the session', async () => {
+    const onError = jest.fn();
+    const onInvalidated = jest.fn();
+    const session = await startSession(
+      {onApdu: () => [0x90, 0x00], onReaderDetected: () => new Promise(() => {}), onInvalidated, onError},
+      {handlerTimeout: 20},
+    );
+
+    emit(event(session.id, 'readerDetected'));
+    session.invalidate();
+    await sleep(50);
+
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({code: 'err_handler_timeout'}));
+    expect(onInvalidated).toHaveBeenCalledWith('userInvalidated');
+  });
+
+  it('passes allowWhenLocked to the native side', async () => {
+    const session = await startSession({onApdu: () => [0x90, 0x00]}, {allowWhenLocked: false});
+
+    expect(mockNative.beginSession).toHaveBeenCalledWith(session.id, false);
+    session.invalidate();
+  });
+
+  it('rejects invalid options', async () => {
+    const {HCE} = require('../js') as typeof import('../js');
+    const handlers = {onApdu: () => [0x90, 0x00]};
+
+    for (const handlerTimeout of [-1, NaN, 0x80000000, '10' as unknown as number]) {
+      await expect(HCE.beginSession(handlers, {handlerTimeout})).rejects.toMatchObject({code: 'err_invalid_argument'});
+    }
+
+    await expect(
+      HCE.beginSession(handlers, {allowWhenLocked: 'no' as unknown as boolean}),
+    ).rejects.toMatchObject({code: 'err_invalid_argument'});
+    expect(mockNative.beginSession).not.toHaveBeenCalled();
+  });
+
+  it('accepts 0 and Infinity as no timeout', async () => {
+    for (const handlerTimeout of [0, Infinity]) {
+      const session = await startSession({onApdu: () => [0x90, 0x00]}, {handlerTimeout});
+      session.invalidate();
+    }
+  });
+
   it('ignores stale APDU responses', async () => {
     const onError = jest.fn();
     mockNative.respondApdu.mockImplementationOnce(() =>
@@ -225,7 +293,7 @@ describe('background handler', () => {
     const factory = jest.fn(() => ({onApdu: () => [0x90, 0x00], onReaderLost}));
 
     HCE.registerBackgroundHandler(factory);
-    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenCalledWith(true);
+    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenCalledWith(true, true);
 
     let finished = false;
     const taskPromise = task({sessionId: 'bg-1', appState: 'foreground'}).then(() => {
@@ -274,10 +342,51 @@ describe('background handler', () => {
 
     HCE.registerBackgroundHandler(factory);
     HCE.unregisterBackgroundHandler();
-    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenLastCalledWith(false);
+    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenLastCalledWith(false, true);
 
-    HCE.registerBackgroundHandler(factory);
-    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenLastCalledWith(true);
+    HCE.registerBackgroundHandler(factory, {allowWhenLocked: false});
+    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenLastCalledWith(true, false);
+  });
+
+  it('finishes if the factory times out, without signalling readiness', async () => {
+    const {HCE} = require('../js') as typeof import('../js');
+    const onApdu = jest.fn(() => [0x90, 0x00]);
+    let resolveFactory!: (handlers: {onApdu: typeof onApdu}) => void;
+    HCE.registerBackgroundHandler(
+      () =>
+        new Promise(resolve => {
+          resolveFactory = resolve;
+        }),
+      {handlerTimeout: 20},
+    );
+
+    await task({sessionId: 'bg-4', appState: 'background'});
+    expect(console.warn).toHaveBeenCalledWith('[HCE] handler error', expect.objectContaining({code: 'err_handler_timeout'}));
+
+    // the late result is ignored
+    resolveFactory({onApdu});
+    await flush();
+    emit(event('bg-4', 'apdu', {apduId: 1, command: '00'}));
+    await flush();
+
+    expect(mockNative.backgroundSessionReady).not.toHaveBeenCalled();
+    expect(onApdu).not.toHaveBeenCalled();
+  });
+
+  it('finishes when onReaderLost() times out', async () => {
+    const {HCE} = require('../js') as typeof import('../js');
+    const onError = jest.fn();
+    HCE.registerBackgroundHandler(
+      () => ({onApdu: () => [0x90, 0x00], onReaderLost: () => new Promise<void>(() => {}), onError}),
+      {handlerTimeout: 20},
+    );
+
+    const taskPromise = task({sessionId: 'bg-5', appState: 'background'});
+    await flush();
+    emit(event('bg-5', 'readerLost'));
+    await taskPromise;
+
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({code: 'err_handler_timeout'}));
   });
 });
 
@@ -300,13 +409,13 @@ describe('background handler declaration', () => {
     await nextTick();
 
     expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenCalledTimes(1);
-    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenCalledWith(false);
+    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenCalledWith(false, true);
   });
 
   it('only declares the handler registered by the entry file', async () => {
     loadIsolated(HCE => HCE.registerBackgroundHandler(() => ({onApdu: () => [0x90, 0x00]})));
     await nextTick();
 
-    expect(mockNative.setBackgroundHandlerRegistered.mock.calls).toEqual([[true]]);
+    expect(mockNative.setBackgroundHandlerRegistered.mock.calls).toEqual([[true, true]]);
   });
 });

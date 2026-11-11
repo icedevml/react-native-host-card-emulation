@@ -1,17 +1,22 @@
 package com.itsecrnd.rtnhceandroid;
 
+import android.app.Activity;
+import android.content.ComponentName;
 import android.content.pm.PackageManager;
 import android.nfc.NfcAdapter;
+import android.nfc.cardemulation.CardEmulation;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.facebook.react.bridge.Arguments;
+import com.facebook.react.bridge.LifecycleEventListener;
 import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.UiThreadUtil;
 import com.facebook.react.bridge.WritableMap;
+import com.facebook.react.common.LifecycleState;
 import com.facebook.react.jstasks.HeadlessJsTaskContext;
 import com.facebook.react.jstasks.HeadlessJsTaskEventListener;
 
@@ -19,8 +24,22 @@ public class RTNHCEAndroidModule extends NativeHCEModuleSpec {
     public static final String TAG = "RTNHCEAndroidModule";
     public static final String NAME = "NativeHCEModule";
 
+    static final class BackgroundHandlerDeclaration {
+        final boolean registered;
+        final boolean allowWhenLocked;
+
+        BackgroundHandlerDeclaration(boolean registered, boolean allowWhenLocked) {
+            this.registered = registered;
+            this.allowWhenLocked = allowWhenLocked;
+        }
+    }
+
     // null until the JS side declares whether it has a background handler
-    private volatile Boolean backgroundHandlerRegistered;
+    private volatile BackgroundHandlerDeclaration backgroundHandlerDeclaration;
+
+    // the activity for which HCEService is the preferred service, main thread only
+    @Nullable
+    private Activity preferredServiceActivity;
 
     private final HeadlessJsTaskEventListener headlessJsTaskEventListener = new HeadlessJsTaskEventListener() {
         @Override
@@ -34,16 +53,41 @@ public class RTNHCEAndroidModule extends NativeHCEModuleSpec {
         }
     };
 
+    /*
+     Android only allows setting the preferred service for a resumed activity
+     and the preference has to be removed once the activity is paused.
+     */
+    private final LifecycleEventListener lifecycleEventListener = new LifecycleEventListener() {
+        @Override
+        public void onHostResume() {
+            updatePreferredService(true);
+        }
+
+        @Override
+        public void onHostPause() {
+            updatePreferredService(false);
+        }
+
+        @Override
+        public void onHostDestroy() {
+            updatePreferredService(false);
+        }
+    };
+
     RTNHCEAndroidModule(ReactApplicationContext context) {
         super(context);
         HeadlessJsTaskContext.getInstance(context).addTaskEventListener(headlessJsTaskEventListener);
+        context.addLifecycleEventListener(lifecycleEventListener);
     }
 
     @Override
     public void invalidate() {
         Log.d(TAG, "invalidate");
-        HeadlessJsTaskContext.getInstance(getReactApplicationContext()).removeTaskEventListener(headlessJsTaskEventListener);
+        ReactApplicationContext context = getReactApplicationContext();
+        HeadlessJsTaskContext.getInstance(context).removeTaskEventListener(headlessJsTaskEventListener);
+        context.removeLifecycleEventListener(lifecycleEventListener);
         HCEManager.getInstance().onModuleInvalidated(this);
+        UiThreadUtil.runOnUiThread(() -> updatePreferredService(false));
         super.invalidate();
     }
 
@@ -58,8 +102,80 @@ public class RTNHCEAndroidModule extends NativeHCEModuleSpec {
     }
 
     @Nullable
-    Boolean getBackgroundHandlerRegistered() {
-        return backgroundHandlerRegistered;
+    BackgroundHandlerDeclaration getBackgroundHandlerDeclaration() {
+        return backgroundHandlerDeclaration;
+    }
+
+    @Nullable
+    private CardEmulation getCardEmulation() {
+        try {
+            NfcAdapter adapter = NfcAdapter.getDefaultAdapter(getReactApplicationContext());
+            return adapter != null ? CardEmulation.getInstance(adapter) : null;
+        } catch (RuntimeException e) {
+            // UnsupportedOperationException if the device doesn't support HCE
+            Log.w(TAG, "getCardEmulation: CardEmulation is not available", e);
+            return null;
+        }
+    }
+
+    /**
+     * Make HCEService the preferred service while the app's activity is resumed and the foreground session
+     * has running emulation, so that it wins the routing of AIDs that other apps also have registered.
+     */
+    // main thread
+    private void updatePreferredService(boolean hostResumed) {
+        Activity activity = hostResumed ? getReactApplicationContext().getCurrentActivity() : null;
+        boolean wanted = activity != null && HCEManager.getInstance().hasRunningEmulation(this);
+
+        if (wanted && activity == preferredServiceActivity) {
+            return;
+        }
+
+        CardEmulation cardEmulation = null;
+
+        if (preferredServiceActivity != null) {
+            cardEmulation = getCardEmulation();
+
+            try {
+                if (cardEmulation != null) {
+                    cardEmulation.unsetPreferredService(preferredServiceActivity);
+                }
+            } catch (RuntimeException e) {
+                // IllegalArgumentException if the activity isn't resumed anymore, the preference is gone anyway
+                Log.w(TAG, "updatePreferredService: unsetPreferredService() failed", e);
+            }
+
+            preferredServiceActivity = null;
+        }
+
+        if (!wanted) {
+            return;
+        }
+
+        if (cardEmulation == null) {
+            cardEmulation = getCardEmulation();
+        }
+
+        if (cardEmulation == null) {
+            return;
+        }
+
+        try {
+            ComponentName service = new ComponentName(getReactApplicationContext(), HCEService.class);
+
+            if (cardEmulation.setPreferredService(activity, service)) {
+                preferredServiceActivity = activity;
+            } else {
+                Log.w(TAG, "updatePreferredService: setPreferredService() refused, is HCEService declared in the manifest?");
+            }
+        } catch (RuntimeException e) {
+            Log.w(TAG, "updatePreferredService: setPreferredService() failed", e);
+        }
+    }
+
+    private void refreshPreferredService() {
+        UiThreadUtil.runOnUiThread(() -> updatePreferredService(
+                getReactApplicationContext().getLifecycleState() == LifecycleState.RESUMED));
     }
 
     void emitEvent(String sessionId, String type) {
@@ -111,14 +227,14 @@ public class RTNHCEAndroidModule extends NativeHCEModuleSpec {
     }
 
     @Override
-    public void beginSession(String sessionId, Promise promise) {
+    public void beginSession(String sessionId, boolean allowWhenLocked, Promise promise) {
         if (!isHCESupported()) {
             promise.reject("err_platform_unsupported", "The device doesn't support NFC host card emulation.");
             return;
         }
 
         try {
-            HCEManager.getInstance().beginSession(this, sessionId);
+            HCEManager.getInstance().beginSession(this, sessionId, allowWhenLocked);
         } catch (IllegalStateException e) {
             promise.reject("err_session_exists", "A session already exists.");
             return;
@@ -130,6 +246,7 @@ public class RTNHCEAndroidModule extends NativeHCEModuleSpec {
     @Override
     public void invalidateSession(String sessionId) {
         HCEManager.getInstance().invalidateSession(this, sessionId);
+        refreshPreferredService();
     }
 
     @Override
@@ -146,6 +263,7 @@ public class RTNHCEAndroidModule extends NativeHCEModuleSpec {
             return;
         }
 
+        refreshPreferredService();
         promise.resolve(null);
     }
 
@@ -158,6 +276,7 @@ public class RTNHCEAndroidModule extends NativeHCEModuleSpec {
             return;
         }
 
+        refreshPreferredService();
         promise.resolve(null);
     }
 
@@ -209,8 +328,8 @@ public class RTNHCEAndroidModule extends NativeHCEModuleSpec {
     }
 
     @Override
-    public void setBackgroundHandlerRegistered(boolean registered) {
-        this.backgroundHandlerRegistered = registered;
+    public void setBackgroundHandlerRegistered(boolean registered, boolean allowWhenLocked) {
+        this.backgroundHandlerDeclaration = new BackgroundHandlerDeclaration(registered, allowWhenLocked);
         UiThreadUtil.runOnUiThread(() -> HCEManager.getInstance().onBackgroundHandlerDeclared(this));
     }
 

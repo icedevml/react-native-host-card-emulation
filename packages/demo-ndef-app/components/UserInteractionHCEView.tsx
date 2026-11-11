@@ -25,11 +25,15 @@ function UserInteractionHCEView({ setCurrentView }: IProps): React.JSX.Element {
   const [emulating, setEmulating] = React.useState(false);
 
   React.useEffect(() => {
+    const generation = generationRef;
+
     // in this demo, nothing happens until the user starts the emulation
     HCE.unregisterBackgroundHandler();
     logEvent('HCE.unregisterBackgroundHandler()');
 
     return () => {
+      // a session that is still being started is invalidated as soon as it's ready (see doBeginSession())
+      generation.current++;
       invalidateSession();
       HCE.registerBackgroundHandler(createBackgroundHandler);
       logEvent('HCE.registerBackgroundHandler()');
@@ -53,19 +57,21 @@ function UserInteractionHCEView({ setCurrentView }: IProps): React.JSX.Element {
   async function doBeginSession() {
     const generation = ++generationRef.current;
     const isCurrent = () => generation === generationRef.current;
+    // the handlers only operate on their own session, never on the one that has replaced it
+    let session: HCESession | null = null;
 
     invalidateSession();
     setEmulating(true);
 
     try {
-      const session = await HCE.beginSession({
+      session = await HCE.beginSession({
         onApdu: apdu => {
           const command = Buffer.from(apdu.command);
           const response = handleCAPDU(command);
           logApdu(command, response);
 
           if (getNDEFAppState().wasNDEFRead) {
-            sessionRef.current?.setAlertMessage('Successfully emulated NDEF!');
+            session?.setAlertMessage('Successfully emulated NDEF!');
           }
 
           return response;
@@ -73,20 +79,20 @@ function UserInteractionHCEView({ setCurrentView }: IProps): React.JSX.Element {
         onReaderDetected: () => {
           logEvent('onReaderDetected()');
           resetNDEFAppState();
-          sessionRef.current?.setAlertMessage('Reader detected');
+          session?.setAlertMessage('Reader detected');
         },
         onReaderLost: async () => {
           logEvent('onReaderLost()');
 
           if (getNDEFAppState().wasNDEFRead) {
-            await sessionRef.current?.stopEmulation('success');
+            await session?.stopEmulation('success');
             logEvent('HCESession.stopEmulation(success)');
 
             if (isCurrent()) {
               setEmulating(false);
             }
           } else {
-            sessionRef.current?.setAlertMessage('Lost reader');
+            session?.setAlertMessage('Lost reader');
           }
         },
         onInvalidated: reason => {
@@ -105,18 +111,25 @@ function UserInteractionHCEView({ setCurrentView }: IProps): React.JSX.Element {
         },
       });
 
+      if (!isCurrent()) {
+        // the user has stopped the emulation or left the view while the session was being started
+        session.invalidate();
+        logEvent('HCESession.invalidate()');
+        return;
+      }
+
       sessionRef.current = session;
       logEvent('HCE.beginSession()');
       session.setAlertMessage('Tap towards the reader');
       await session.startEmulation();
       logEvent('HCESession.startEmulation()');
     } catch (error) {
+      console.error('beginSession err', error);
+
       if (isCurrent()) {
         setEmulating(false);
+        Alert.alert('Error', 'Failed to begin NFC session: ' + error);
       }
-
-      console.error('beginSession err', error);
-      Alert.alert('Error', 'Failed to begin NFC session: ' + error);
     }
   }
 

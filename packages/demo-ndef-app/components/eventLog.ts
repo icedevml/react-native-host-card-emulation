@@ -16,6 +16,11 @@ const MAX_ENTRIES = 300;
  Module-level store, so that it's shared between the views and the background handler
  (background.ts). On Android, the background handler runs as a headless JS task in the same
  JS runtime as the UI, so the entries it adds show up in the UI whenever the app is open.
+
+ NOTE: For the demo purposes, every C-APDU and R-APDU is also logged with console.log(), which ends up
+ in the system log (logcat on Android) also in release builds. Don't do that in production apps,
+ the APDUs might carry sensitive data (tokens, credentials, personal data) readable by anyone with
+ access to the device logs.
  */
 let entries: LogEntry[] = [];
 let nextId = 0;

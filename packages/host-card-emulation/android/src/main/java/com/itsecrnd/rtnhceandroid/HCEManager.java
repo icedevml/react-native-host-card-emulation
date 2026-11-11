@@ -3,6 +3,8 @@ package com.itsecrnd.rtnhceandroid;
 import android.app.Application;
 import android.nfc.cardemulation.HostApduService;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
@@ -14,6 +16,7 @@ import com.facebook.react.ReactInstanceEventListener;
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.NativeModule;
 import com.facebook.react.bridge.ReactContext;
+import com.facebook.react.bridge.UiThreadUtil;
 import com.facebook.react.common.LifecycleState;
 import com.facebook.react.jstasks.HeadlessJsTaskConfig;
 import com.facebook.react.jstasks.HeadlessJsTaskContext;
@@ -41,6 +44,12 @@ final class HCEManager {
     // ISO 7816-4: no precise diagnosis (internal error)
     static final byte[] SW_NO_PRECISE_DIAGNOSIS = {(byte) 0x6F, (byte) 0x00};
 
+    /*
+     How long a background interaction may wait for React Native to start and for the JS side to declare
+     whether it has a background handler. Generous, as a cold start on a slow device might take a while.
+     */
+    private static final long ROUTING_TIMEOUT_MS = 15_000;
+
     private static final HCEManager INSTANCE = new HCEManager();
 
     static HCEManager getInstance() {
@@ -50,11 +59,13 @@ final class HCEManager {
     private static final class ForegroundSession {
         final String id;
         final RTNHCEAndroidModule module;
+        final boolean allowWhenLocked;
         boolean emulationRunning;
 
-        ForegroundSession(String id, RTNHCEAndroidModule module) {
+        ForegroundSession(String id, RTNHCEAndroidModule module, boolean allowWhenLocked) {
             this.id = id;
             this.module = module;
+            this.allowWhenLocked = allowWhenLocked;
         }
     }
 
@@ -77,16 +88,32 @@ final class HCEManager {
         // whether the activation waits for the JS side to declare whether it has a background handler
         boolean awaitingJs;
         int taskId = -1;
+        // whether the C-APDUs may be handled while the device is locked, null until the handler is known
+        @Nullable
+        Boolean allowWhenLocked;
+        // whether the device was locked when the most recent C-APDU was received
+        boolean deviceLocked;
+
+        // set while waiting for React Native to start
+        @Nullable
+        ReactHost reactHost;
+        @Nullable
+        ReactInstanceEventListener reactListener;
+        // set while waiting for the background handler to be known
+        @Nullable
+        Runnable routingTimeout;
 
         long pendingApduId;
         byte[] pendingCommand;
         boolean pendingDeviceLocked;
 
-        Activation(HostApduService service) {
+        Activation(HostApduService service, boolean deviceLocked) {
             this.service = service;
+            this.deviceLocked = deviceLocked;
         }
     }
 
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private ForegroundSession foregroundSession;
     private Activation activation;
     private long lastApduId;
@@ -148,12 +175,21 @@ final class HCEManager {
         }
 
         if (activation == null) {
-            activation = startActivation(service);
+            activation = startActivation(service, deviceLocked);
         }
 
         Activation a = activation;
+        a.deviceLocked = deviceLocked;
 
         if (a.target == Target.REJECTED) {
+            return notAvailableResponse(command);
+        }
+
+        if (deviceLocked && Boolean.FALSE.equals(a.allowWhenLocked)) {
+            // the device was locked during the interaction, the C-APDU isn't delivered to the JS side
+            Log.d(TAG, "onCommand: the device is locked and the handler doesn't allow that, rejecting the C-APDU");
+            // a late response to the previous C-APDU must not be taken as the response to this one
+            a.pendingCommand = null;
             return notAvailableResponse(command);
         }
 
@@ -192,8 +228,8 @@ final class HCEManager {
      * Activation handling
      * ------------------------------------------------------------------------------------------- */
 
-    private Activation startActivation(@NonNull HostApduService service) {
-        Activation a = new Activation(service);
+    private Activation startActivation(@NonNull HostApduService service, boolean deviceLocked) {
+        Activation a = new Activation(service, deviceLocked);
         ForegroundSession fg = foregroundSession;
 
         if (fg != null && fg.emulationRunning) {
@@ -201,6 +237,14 @@ final class HCEManager {
             a.target = Target.SESSION;
             a.sessionId = fg.id;
             a.module = fg.module;
+            a.allowWhenLocked = fg.allowWhenLocked;
+
+            if (deviceLocked && !fg.allowWhenLocked) {
+                Log.d(TAG, "startActivation: the device is locked and the session doesn't allow that, rejecting");
+                a.target = Target.REJECTED;
+                return a;
+            }
+
             a.ready = true;
             fg.module.emitEvent(fg.id, "readerDetected");
             return a;
@@ -224,21 +268,59 @@ final class HCEManager {
             Log.d(TAG, "startActivation: starting React Native for background handler " + a.sessionId);
             final Activation pendingActivation = a;
 
-            reactHost.addReactInstanceEventListener(new ReactInstanceEventListener() {
+            a.reactHost = reactHost;
+            a.reactListener = new ReactInstanceEventListener() {
                 @Override
                 public void onReactContextInitialized(@NonNull ReactContext context) {
                     // one-shot listener, otherwise it would leak and fire again on every reload
                     reactHost.removeReactInstanceEventListener(this);
-                    onReactContextReady(pendingActivation, context);
+                    // HeadlessJsTaskContext must be used on the main thread
+                    UiThreadUtil.runOnUiThread(() -> onReactContextReady(pendingActivation, context));
                 }
-            });
+            };
+            reactHost.addReactInstanceEventListener(a.reactListener);
             reactHost.start();
+        }
+
+        if (a.target == Target.BACKGROUND && a.module == null) {
+            // don't hold the reader forever if React Native fails to start or the JS side never declares the handler
+            final Activation waitingActivation = a;
+            a.routingTimeout = () -> onRoutingTimeout(waitingActivation);
+            mainHandler.postDelayed(a.routingTimeout, ROUTING_TIMEOUT_MS);
         }
 
         return a;
     }
 
+    private synchronized void onRoutingTimeout(Activation a) {
+        if (activation == a && a.target == Target.BACKGROUND && a.module == null) {
+            Log.w(TAG, "onRoutingTimeout: the background handler is still unknown, rejecting " + a.sessionId);
+            rejectActivation(a);
+        }
+    }
+
+    /**
+     * Stop waiting for React Native and for the background handler declaration.
+     */
+    private void stopRouting(Activation a) {
+        if (a.routingTimeout != null) {
+            mainHandler.removeCallbacks(a.routingTimeout);
+            a.routingTimeout = null;
+        }
+
+        if (a.reactHost != null && a.reactListener != null) {
+            a.reactHost.removeReactInstanceEventListener(a.reactListener);
+        }
+
+        a.reactHost = null;
+        a.reactListener = null;
+    }
+
     private synchronized void onReactContextReady(Activation a, ReactContext reactContext) {
+        // the listener has already removed itself
+        a.reactHost = null;
+        a.reactListener = null;
+
         if (activation != a || a.target != Target.BACKGROUND || a.module != null) {
             // the activation has already ended
             return;
@@ -254,9 +336,10 @@ final class HCEManager {
      */
     // must be called on the main thread
     private void routeToBackgroundHandler(Activation a, @Nullable RTNHCEAndroidModule module, ReactContext reactContext) {
-        Boolean registered = module != null ? module.getBackgroundHandlerRegistered() : null;
+        RTNHCEAndroidModule.BackgroundHandlerDeclaration declaration =
+                module != null ? module.getBackgroundHandlerDeclaration() : null;
 
-        if (registered == null) {
+        if (declaration == null) {
             Log.d(TAG, "routeToBackgroundHandler: waiting for the JS side " + a.sessionId);
             a.awaitingJs = true;
             return;
@@ -264,11 +347,19 @@ final class HCEManager {
 
         a.awaitingJs = false;
 
-        if (!registered) {
+        if (!declaration.registered) {
             Log.d(TAG, "routeToBackgroundHandler: no session and no background handler, rejecting");
             rejectActivation(a);
             return;
         }
+
+        if (a.deviceLocked && !declaration.allowWhenLocked) {
+            Log.d(TAG, "routeToBackgroundHandler: the device is locked and the background handler doesn't allow that, rejecting");
+            rejectActivation(a);
+            return;
+        }
+
+        a.allowWhenLocked = declaration.allowWhenLocked;
 
         Log.d(TAG, "routeToBackgroundHandler: background handler " + a.sessionId);
         startBackgroundTask(a, module, reactContext);
@@ -276,6 +367,7 @@ final class HCEManager {
 
     // must be called on the main thread
     private void startBackgroundTask(Activation a, RTNHCEAndroidModule module, ReactContext reactContext) {
+        stopRouting(a);
         a.module = module;
         ReactContext taskContext = module.getContext();
 
@@ -321,6 +413,7 @@ final class HCEManager {
      * The pending C-APDU (if any) is responded to with an error status word.
      */
     private void rejectActivation(Activation a) {
+        stopRouting(a);
         a.target = Target.REJECTED;
         a.ready = false;
 
@@ -331,6 +424,8 @@ final class HCEManager {
     }
 
     private void endActivation(Activation a) {
+        stopRouting(a);
+
         if (a.ready && a.module != null) {
             a.module.emitEvent(a.sessionId, "readerLost");
         }
@@ -344,12 +439,12 @@ final class HCEManager {
      * Module callbacks (JS thread, main thread for headless task events)
      * ------------------------------------------------------------------------------------------- */
 
-    synchronized void beginSession(RTNHCEAndroidModule module, String sessionId) {
+    synchronized void beginSession(RTNHCEAndroidModule module, String sessionId, boolean allowWhenLocked) {
         if (foregroundSession != null) {
             throw new IllegalStateException("A session already exists.");
         }
 
-        foregroundSession = new ForegroundSession(sessionId, module);
+        foregroundSession = new ForegroundSession(sessionId, module, allowWhenLocked);
         module.emitEvent(sessionId, "sessionStarted");
     }
 
@@ -378,6 +473,11 @@ final class HCEManager {
     synchronized boolean isEmulationRunning(RTNHCEAndroidModule module, String sessionId) {
         ForegroundSession fg = foregroundSession;
         return fg != null && fg.module == module && fg.id.equals(sessionId) && fg.emulationRunning;
+    }
+
+    synchronized boolean hasRunningEmulation(RTNHCEAndroidModule module) {
+        ForegroundSession fg = foregroundSession;
+        return fg != null && fg.module == module && fg.emulationRunning;
     }
 
     private ForegroundSession requireSession(RTNHCEAndroidModule module, String sessionId) {

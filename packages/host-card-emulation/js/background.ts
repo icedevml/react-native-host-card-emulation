@@ -1,13 +1,31 @@
 import {AppRegistry, Platform} from 'react-native';
 
 import NativeHCEModule from './NativeHCEModule';
-import {addSessionListener, HCEError, processApdu, reportError, SerialQueue} from './internal';
-import type {BackgroundAppState, BackgroundHandlerFactory, BackgroundHandlers} from './types';
+import {
+  addSessionListener,
+  callHandler,
+  HCEError,
+  processApdu,
+  reportError,
+  resolveHandlerOptions,
+  SerialQueue,
+} from './internal';
+import type {
+  BackgroundAppState,
+  BackgroundHandlerFactory,
+  BackgroundHandlerOptions,
+  BackgroundHandlers,
+} from './types';
 
 // must match HCEManager.BACKGROUND_TASK_KEY on the native side
 const BACKGROUND_TASK_KEY = 'handleBackgroundHCECall';
 
-let currentFactory: BackgroundHandlerFactory | null = null;
+interface BackgroundRegistration {
+  factory: BackgroundHandlerFactory;
+  handlerTimeout: number;
+}
+
+let currentRegistration: BackgroundRegistration | null = null;
 let taskRegistered = false;
 
 if (Platform.OS === 'android') {
@@ -18,7 +36,7 @@ if (Platform.OS === 'android') {
    */
   setTimeout(() => {
     if (!taskRegistered) {
-      NativeHCEModule.setBackgroundHandlerRegistered(false);
+      NativeHCEModule.setBackgroundHandlerRegistered(false, true);
     }
   }, 0);
 }
@@ -30,13 +48,14 @@ interface BackgroundTaskData {
 
 async function runBackgroundTask(data: BackgroundTaskData): Promise<void> {
   const sessionId = data?.sessionId;
-  const factory = currentFactory;
+  const registration = currentRegistration;
 
-  if (!sessionId || !factory) {
+  if (!sessionId || !registration) {
     // finishing the task makes the native side reject the C-APDUs of this interaction
     return;
   }
 
+  const {factory, handlerTimeout} = registration;
   const appState: BackgroundAppState = data.appState === 'foreground' ? 'foreground' : 'background';
   const queue = new SerialQueue();
   let handlers: BackgroundHandlers | null = null;
@@ -65,11 +84,11 @@ async function runBackgroundTask(data: BackgroundTaskData): Promise<void> {
       }
 
       if (event.type === 'apdu') {
-        queue.push(() => processApdu(sessionId, event, h.onApdu, h.onError));
+        queue.push(() => processApdu(sessionId, event, h.onApdu, h.onError, handlerTimeout));
       } else if (event.type === 'readerLost') {
         const onReaderLost = h.onReaderLost;
         queue
-          .push(() => onReaderLost?.())
+          .push(() => callHandler('onReaderLost()', () => onReaderLost?.(), handlerTimeout))
           .catch(e => reportError(h.onError, e))
           .finally(finish);
       }
@@ -77,7 +96,11 @@ async function runBackgroundTask(data: BackgroundTaskData): Promise<void> {
 
     (async () => {
       try {
-        const created = await factory({sessionId, appState});
+        const created = await callHandler(
+          'The background handler factory',
+          () => factory({sessionId, appState}),
+          handlerTimeout,
+        );
 
         if (!created || typeof created.onApdu !== 'function') {
           throw new HCEError('err_invalid_argument', 'The background handler factory must return an object with onApdu().');
@@ -105,9 +128,12 @@ async function runBackgroundTask(data: BackgroundTaskData): Promise<void> {
  * without an active session (check BackgroundContext.appState).
  *
  * Call it once, at the top level of the app's entry file (index.js), before AppRegistry.registerComponent().
- * Calling it again replaces the previous factory. No-op on iOS.
+ * Calling it again replaces the previous factory and its options. No-op on iOS.
  */
-export function registerBackgroundHandler(factory: BackgroundHandlerFactory): void {
+export function registerBackgroundHandler(
+  factory: BackgroundHandlerFactory,
+  options: BackgroundHandlerOptions = {},
+): void {
   if (Platform.OS !== 'android') {
     return;
   }
@@ -116,14 +142,15 @@ export function registerBackgroundHandler(factory: BackgroundHandlerFactory): vo
     throw new HCEError('err_invalid_argument', 'The background handler factory must be a function.');
   }
 
-  currentFactory = factory;
+  const {handlerTimeout, allowWhenLocked} = resolveHandlerOptions(options);
+  currentRegistration = {factory, handlerTimeout};
 
   if (!taskRegistered) {
     AppRegistry.registerHeadlessTask(BACKGROUND_TASK_KEY, () => runBackgroundTask);
     taskRegistered = true;
   }
 
-  NativeHCEModule.setBackgroundHandlerRegistered(true);
+  NativeHCEModule.setBackgroundHandlerRegistered(true, allowWhenLocked);
 }
 
 /**
@@ -136,6 +163,6 @@ export function unregisterBackgroundHandler(): void {
     return;
   }
 
-  currentFactory = null;
-  NativeHCEModule.setBackgroundHandlerRegistered(false);
+  currentRegistration = null;
+  NativeHCEModule.setBackgroundHandlerRegistered(false, true);
 }
