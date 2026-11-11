@@ -3,14 +3,11 @@
  */
 
 import { AppRegistry } from 'react-native';
+import HCE from '@icedevml/react-native-host-card-emulation';
 import App from './App';
 import { name as appName } from './app.json';
-import { createBackgroundHCE } from '@icedevml/react-native-host-card-emulation/js/hceBackground';
-import runBackgroundHCETask from './background';
+import createBackgroundHandler from './background';
 
+// Android: handles HCE interactions while the app has no active session (also when it's not running)
+HCE.registerBackgroundHandler(createBackgroundHandler);
 AppRegistry.registerComponent(appName, () => App);
-AppRegistry.registerHeadlessTask('handleBackgroundHCECall', () => {
-  return async (taskData) => {
-    return await runBackgroundHCETask(createBackgroundHCE(taskData));
-  }
-});

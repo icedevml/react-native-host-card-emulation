@@ -1,11 +1,12 @@
 import React from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { StatusBar, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import MainView from './components/MainView.tsx';
 import UserInteractionHCEView from './components/UserInteractionHCEView.tsx';
 import PresentmentHCEView from './components/PresentmentHCEView.tsx';
 import ContinousHCEView from './components/ContinousHCEView.tsx';
+import { colors } from './components/ui.tsx';
 
 function App(): React.JSX.Element {
   const [currentView, setCurrentView] = React.useState<string>("main");
@@ -24,18 +25,15 @@ function App(): React.JSX.Element {
 
   return (
     <SafeAreaProvider>
+      <StatusBar barStyle="dark-content" />
       <SafeAreaView style={styles.safeAreaView}>
-        <Text style={styles.headerText}>Demo App for Native HCE Module</Text>
-        <Text style={styles.headerText}>
-          GitHub: icedevml/react-native-host-card-emulation
-        </Text>
-        <View
-          style={{
-            borderBottomColor: 'black',
-            borderBottomWidth: StyleSheet.hairlineWidth,
-          }}
-        />
-        {renderCurrentView()}
+        <View style={styles.header}>
+          <Text style={styles.title}>HCE Module Demo</Text>
+          <Text style={styles.subtitle}>
+            github.com/icedevml/react-native-host-card-emulation
+          </Text>
+        </View>
+        <View style={styles.content}>{renderCurrentView()}</View>
       </SafeAreaView>
     </SafeAreaProvider>
   );
@@ -44,27 +42,31 @@ function App(): React.JSX.Element {
 const styles = StyleSheet.create({
   safeAreaView: {
     flex: 1,
-    backgroundColor: 'white',
+    // edge-to-edge: the system bars are drawn over the insets, matching the header
+    backgroundColor: colors.surface,
   },
-  text: {
-    margin: 10,
+  header: {
+    backgroundColor: colors.surface,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
+  },
+  title: {
     fontSize: 20,
-    color: 'black',
+    fontWeight: '700',
+    color: colors.text,
   },
-  headerText: {
-    margin: 10,
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: 'black',
+  subtitle: {
+    fontSize: 12,
+    color: colors.textMuted,
+    marginTop: 2,
   },
-  textInput: {
-    margin: 10,
-    height: 40,
-    borderColor: 'black',
-    borderWidth: 1,
-    paddingLeft: 5,
-    paddingRight: 5,
-    borderRadius: 5,
+  content: {
+    flex: 1,
+    backgroundColor: colors.background,
+    padding: 16,
+    gap: 12,
   },
 });
 

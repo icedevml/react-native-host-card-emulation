@@ -1,142 +1,160 @@
 import React from 'react';
-import { Alert, Button, StyleSheet, Text } from 'react-native';
+import { Alert, Text } from 'react-native';
 
 import { Buffer } from 'buffer/';
 
-import NativeHCEModule, {
-  HCEModuleEvent,
-} from '@icedevml/react-native-host-card-emulation/js/NativeHCEModule';
+import HCE, { HCESession } from '@icedevml/react-native-host-card-emulation';
 import { createNDEFType4TagApp } from '../ndefType4TagApp.ts';
+import createBackgroundHandler from '../background.ts';
+import { logApdu, logEvent } from './eventLog.ts';
+import EventLogView from './EventLogView.tsx';
+import { ActionButton, BackButton, Section, textStyles } from './ui.tsx';
 
 interface IProps {
   setCurrentView: (view: string) => void;
 }
 
 function UserInteractionHCEView({ setCurrentView }: IProps): React.JSX.Element {
-  const [recentEventsList, setRecentEventsList] = React.useState<string[]>([]);
   const [getNDEFAppState, resetNDEFAppState, handleCAPDU] = React.useMemo(
-    () => createNDEFType4TagApp(),
+    () => createNDEFType4TagApp('https://example.com/'),
     [],
   );
+  const sessionRef = React.useRef<HCESession | null>(null);
+  // identifies the current session, so that the events of the replaced ones don't change the UI
+  const generationRef = React.useRef(0);
+  const [emulating, setEmulating] = React.useState(false);
 
   React.useEffect(() => {
-    const subscription = NativeHCEModule.onEvent(
-      async (event: HCEModuleEvent) => {
-        try {
-          console.log('received event', event);
-          setRecentEventsList(prevState => {
-            const data = [...prevState, event.type + ' ' + event.arg];
-            return data.slice(-15);
-          });
+    const generation = generationRef;
 
-          switch (event.type) {
-            case 'readerDetected':
-              resetNDEFAppState();
-              NativeHCEModule.setSessionAlertMessage('Reader detected');
-              break;
-
-            case 'readerDeselected':
-              if (getNDEFAppState().wasNDEFRead) {
-                await NativeHCEModule.stopHCE('success');
-              } else {
-                NativeHCEModule.setSessionAlertMessage('Lost reader');
-              }
-              break;
-
-            case 'sessionStarted':
-              NativeHCEModule.setSessionAlertMessage('Tap towards the reader');
-              await NativeHCEModule.startHCE();
-              break;
-
-            case 'sessionInvalidated':
-              if (event.arg === 'maxSessionDurationReached') {
-                Alert.alert(
-                  'Information',
-                  'Session has timed out and thus was invalidated ' +
-                    'by the operating system.',
-                );
-              }
-              break;
-
-            case 'received':
-              const capdu = Buffer.from(event.arg!, 'hex');
-              await NativeHCEModule.respondAPDU(
-                null,
-                handleCAPDU(capdu).toString('hex'),
-              );
-
-              if (getNDEFAppState().wasNDEFRead) {
-                NativeHCEModule.setSessionAlertMessage(
-                  'Successfully emulated NDEF!',
-                );
-              }
-              break;
-          }
-        } catch (err) {
-          console.error('error in event handler', err);
-        }
-      },
-    );
+    // in this demo, nothing happens until the user starts the emulation
+    HCE.unregisterBackgroundHandler();
+    logEvent('HCE.unregisterBackgroundHandler()');
 
     return () => {
-      subscription.remove();
+      // a session that is still being started is invalidated as soon as it's ready (see doBeginSession())
+      generation.current++;
+      invalidateSession();
+      HCE.registerBackgroundHandler(createBackgroundHandler);
+      logEvent('HCE.registerBackgroundHandler()');
     };
-  }, [getNDEFAppState, resetNDEFAppState, handleCAPDU]);
+  }, []);
 
-  async function doBeginSession() {
-    try {
-      await NativeHCEModule.beginSession();
-    } catch (error) {
-      console.error('beginSession err', error);
-      Alert.alert('Error', 'Failed to begin NFC session: ' + error);
-      return;
+  function invalidateSession() {
+    if (sessionRef.current) {
+      sessionRef.current.invalidate();
+      sessionRef.current = null;
+      logEvent('HCESession.invalidate()');
     }
   }
 
-  let recentEvents = recentEventsList.join('\n');
+  function stopSession() {
+    generationRef.current++;
+    invalidateSession();
+    setEmulating(false);
+  }
+
+  async function doBeginSession() {
+    const generation = ++generationRef.current;
+    const isCurrent = () => generation === generationRef.current;
+    // the handlers only operate on their own session, never on the one that has replaced it
+    let session: HCESession | null = null;
+
+    invalidateSession();
+    setEmulating(true);
+
+    try {
+      session = await HCE.beginSession({
+        onApdu: apdu => {
+          const command = Buffer.from(apdu.command);
+          const response = handleCAPDU(command);
+          logApdu(command, response);
+
+          if (getNDEFAppState().wasNDEFRead) {
+            session?.setAlertMessage('Successfully emulated NDEF!');
+          }
+
+          return response;
+        },
+        onReaderDetected: () => {
+          logEvent('onReaderDetected()');
+          resetNDEFAppState();
+          session?.setAlertMessage('Reader detected');
+        },
+        onReaderLost: async () => {
+          logEvent('onReaderLost()');
+
+          if (getNDEFAppState().wasNDEFRead) {
+            await session?.stopEmulation('success');
+            logEvent('HCESession.stopEmulation(success)');
+
+            if (isCurrent()) {
+              setEmulating(false);
+            }
+          } else {
+            session?.setAlertMessage('Lost reader');
+          }
+        },
+        onInvalidated: reason => {
+          logEvent(`onInvalidated(${reason})`);
+
+          if (isCurrent()) {
+            setEmulating(false);
+          }
+
+          if (reason === 'maxSessionDurationReached') {
+            Alert.alert(
+              'Information',
+              'Session has timed out and thus was invalidated by the operating system.',
+            );
+          }
+        },
+      });
+
+      if (!isCurrent()) {
+        // the user has stopped the emulation or left the view while the session was being started
+        session.invalidate();
+        logEvent('HCESession.invalidate()');
+        return;
+      }
+
+      sessionRef.current = session;
+      logEvent('HCE.beginSession()');
+      session.setAlertMessage('Tap towards the reader');
+      await session.startEmulation();
+      logEvent('HCESession.startEmulation()');
+    } catch (error) {
+      console.error('beginSession err', error);
+
+      if (isCurrent()) {
+        setEmulating(false);
+        Alert.alert('Error', 'Failed to begin NFC session: ' + error);
+      }
+    }
+  }
 
   return (
     <>
-      <Button
-        title="Back to main menu"
-        onPress={() => setCurrentView('main')}
-      />
-      <Text style={styles.headerText}>Starting HCE after user interaction</Text>
-      <Text style={styles.text}>
-        Tap on the button below to start the HCE session. Then, tap your
-        smartphone to the reader.
-      </Text>
-      <Button title="Begin HCE session&emulation" onPress={doBeginSession} />
-      <Text style={styles.text}>{recentEvents}</Text>
+      <BackButton onPress={() => setCurrentView('main')} />
+      <Section title="Starting HCE after user interaction">
+        <Text style={textStyles.body}>
+          Tap on the button below to start the HCE session. Then, tap your
+          smartphone to the reader.
+        </Text>
+        <Text style={textStyles.hint}>
+          The emulated tag contains https://example.com/. Background handling is
+          disabled while this view is open.
+        </Text>
+        <ActionButton
+          title={emulating ? 'Emulation running' : 'Begin HCE session & emulation'}
+          subtitle={emulating ? 'Tap to stop' : undefined}
+          active={emulating}
+          onPress={emulating ? stopSession : doBeginSession}
+        />
+      </Section>
+      <EventLogView />
     </>
   );
 }
-
-const styles = StyleSheet.create({
-  safeAreaView: {
-    flex: 1,
-    backgroundColor: 'white',
-  },
-  text: {
-    margin: 10,
-    fontSize: 20,
-    color: 'black',
-  },
-  headerText: {
-    margin: 10,
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: 'black',
-  },
-  textInput: {
-    margin: 10,
-    height: 40,
-    borderColor: 'black',
-    borderWidth: 1,
-    paddingLeft: 5,
-    paddingRight: 5,
-    borderRadius: 5,
-  },
-});
 
 export default UserInteractionHCEView;

@@ -1,6 +1,21 @@
 #import "RTNHCEModuleIOS.h"
+
+#if __has_include("RCTDefaultReactNativeFactoryDelegate.h")
 #import "RCTDefaultReactNativeFactoryDelegate.h"
+#endif
+
+// the header generated from the Swift sources is named after the module:
+// "RTNHCEModuleIOS" (CocoaPods) or "ReactNativeHostCardEmulationSwift" (SwiftPM)
+#if __has_include("RTNHCEModuleIOS-Swift.h")
 #import "RTNHCEModuleIOS-Swift.h"
+#elif __has_include(<RTNHCEModuleIOS/RTNHCEModuleIOS-Swift.h>)
+#import <RTNHCEModuleIOS/RTNHCEModuleIOS-Swift.h>
+#else
+#import "ReactNativeHostCardEmulationSwift-Swift.h"
+#endif
+
+static NSString *const kUnsupportedCode = @"err_platform_unsupported";
+static NSString *const kUnsupportedMessage = @"This iOS version does not support HCE.";
 
 @implementation RTNHCEModuleIOS {
     API_AVAILABLE(ios(17.4))
@@ -14,39 +29,51 @@
         __weak RTNHCEModuleIOS *weakSelf = self;
 
         hcemoduleios = [RTNHCEModuleIOSImpl new];
-        [hcemoduleios setEmitOnEventWithEmitOnEvent:^(NSString *type, NSString *arg){
-            [weakSelf emitOnEvent:@{@"type": type, @"arg": arg}];
+        [hcemoduleios setEmitOnEventWithEmitOnEvent:^(NSDictionary *value){
+            [weakSelf emitOnEvent:value];
         }];
-    } else {
-        // ignore
     }
 
     return(self);
 }
 
+// called by React Native when the module is torn down (e.g. JS reload)
+- (void)invalidate {
+    if (@available(iOS 17.4, *)) {
+        [hcemoduleios invalidateAll];
+    }
+}
+
 - (void)dealloc {
-    [hcemoduleios setEmitOnEventWithEmitOnEvent:^(NSString *type, NSString *arg){
-        // no-op
-    }];
+    if (@available(iOS 17.4, *)) {
+        [hcemoduleios invalidateAll];
+    }
 }
 
 - (std::shared_ptr<facebook::react::TurboModule>)getTurboModule:(const facebook::react::ObjCTurboModule::InitParams &)params {
     return std::make_shared<facebook::react::NativeHCEModuleSpecJSI>(params);
 }
 
-- (nonnull NSNumber *)isPlatformSupported {
+- (void)getCapabilities:(nonnull RCTPromiseResolveBlock)resolve reject:(nonnull RCTPromiseRejectBlock)reject {
     if (@available(iOS 17.4, *)) {
-        return @1;
+        [hcemoduleios getCapabilitiesWithResolve:resolve reject:reject];
+    } else {
+        resolve(@{
+            @"platform": @"ios",
+            @"hceSupported": @NO,
+            @"nfcEnabled": @NO,
+            @"eligible": @NO,
+            @"backgroundSupported": @NO,
+            @"presentmentSupported": @NO,
+        });
     }
-
-    return @0;
 }
 
 - (void)acquireExclusiveNFC:(nonnull RCTPromiseResolveBlock)resolve reject:(nonnull RCTPromiseRejectBlock)reject {
     if (@available(iOS 17.4, *)) {
-        return [hcemoduleios acquireExclusiveNFCWithResolve:resolve reject:reject];
+        [hcemoduleios acquireExclusiveNFCWithResolve:resolve reject:reject];
     } else {
-        reject(@"err_platform_unsupported", @"This iOS version does not support HCE.", nil);
+        reject(kUnsupportedCode, kUnsupportedMessage, nil);
     }
 }
 
@@ -58,78 +85,72 @@
 
 - (nonnull NSNumber *)isExclusiveNFC {
     if (@available(iOS 17.4, *)) {
-        return [hcemoduleios isExclusiveNFC] ? @1 : @0;
+        return [hcemoduleios isExclusiveNFC] ? @YES : @NO;
     }
 
-    return @0;
+    return @NO;
 }
 
-- (void)beginSession:(nonnull RCTPromiseResolveBlock)resolve reject:(nonnull RCTPromiseRejectBlock)reject {
+// allowWhenLocked is ignored, it's impossible to communicate over HCE while the device is locked
+- (void)beginSession:(nonnull NSString *)sessionId allowWhenLocked:(BOOL)allowWhenLocked resolve:(nonnull RCTPromiseResolveBlock)resolve reject:(nonnull RCTPromiseRejectBlock)reject {
     if (@available(iOS 17.4, *)) {
-        return [hcemoduleios beginSessionWithResolve:resolve reject:reject];
+        [hcemoduleios beginSessionWithSessionId:sessionId resolve:resolve reject:reject];
     } else {
-        reject(@"err_platform_unsupported", @"This iOS version does not support HCE.", nil);
+        reject(kUnsupportedCode, kUnsupportedMessage, nil);
     }
 }
 
-- (void)setSessionAlertMessage:(nonnull NSString *)message {
+- (void)invalidateSession:(nonnull NSString *)sessionId {
     if (@available(iOS 17.4, *)) {
-        return [hcemoduleios setSessionAlertMessageWithMessage:message];
+        [hcemoduleios invalidateSessionWithSessionId:sessionId];
     }
 }
 
-- (void)invalidateSession {
+- (void)setSessionAlertMessage:(nonnull NSString *)sessionId message:(nonnull NSString *)message {
     if (@available(iOS 17.4, *)) {
-        [hcemoduleios invalidateSession];
+        [hcemoduleios setSessionAlertMessageWithSessionId:sessionId message:message];
     }
 }
 
-- (nonnull NSNumber *)isSessionRunning {
+- (void)startEmulation:(nonnull NSString *)sessionId resolve:(nonnull RCTPromiseResolveBlock)resolve reject:(nonnull RCTPromiseRejectBlock)reject {
     if (@available(iOS 17.4, *)) {
-        return [hcemoduleios isSessionRunning] ? @1 : @0;
+        [hcemoduleios startEmulationWithSessionId:sessionId resolve:resolve reject:reject];
     } else {
-        return @0;
+        reject(kUnsupportedCode, kUnsupportedMessage, nil);
     }
 }
 
-- (nonnull NSNumber *)beginBackgroundHCE:(nonnull NSString *)handle {
-    return @0;
-}
-
-- (nonnull NSNumber *)finishBackgroundHCE:(nonnull NSString *)handle {
-    return @0;
-}
-
-- (void)startHCE:(nonnull RCTPromiseResolveBlock)resolve reject:(nonnull RCTPromiseRejectBlock)reject {
+- (void)stopEmulation:(nonnull NSString *)sessionId status:(nonnull NSString *)status resolve:(nonnull RCTPromiseResolveBlock)resolve reject:(nonnull RCTPromiseRejectBlock)reject {
     if (@available(iOS 17.4, *)) {
-        return [hcemoduleios startHCEWithResolve:resolve reject:reject];
+        [hcemoduleios stopEmulationWithSessionId:sessionId status:status resolve:resolve reject:reject];
     } else {
-        reject(@"err_platform_unsupported", @"This iOS version does not support HCE.", nil);
+        reject(kUnsupportedCode, kUnsupportedMessage, nil);
     }
 }
 
-- (void)stopHCE:(nonnull NSString *)status resolve:(nonnull RCTPromiseResolveBlock)resolve reject:(nonnull RCTPromiseRejectBlock)reject {
+- (void)isEmulationRunning:(nonnull NSString *)sessionId resolve:(nonnull RCTPromiseResolveBlock)resolve reject:(nonnull RCTPromiseRejectBlock)reject {
     if (@available(iOS 17.4, *)) {
-        return [hcemoduleios stopHCEWithStatus:status resolve:resolve reject:reject];
+        [hcemoduleios isEmulationRunningWithSessionId:sessionId resolve:resolve reject:reject];
     } else {
-        reject(@"err_platform_unsupported", @"This iOS version does not support HCE.", nil);
+        resolve(@NO);
     }
 }
 
-- (void)respondAPDU:(NSString * _Nullable)handle rapdu:(nonnull NSString *)rapdu resolve:(nonnull RCTPromiseResolveBlock)resolve reject:(nonnull RCTPromiseRejectBlock)reject {
+- (void)respondApdu:(nonnull NSString *)sessionId apduId:(double)apduId rapdu:(nonnull NSString *)rapdu resolve:(nonnull RCTPromiseResolveBlock)resolve reject:(nonnull RCTPromiseRejectBlock)reject {
     if (@available(iOS 17.4, *)) {
-        return [hcemoduleios respondAPDUWithHandle:handle rapdu:rapdu resolve:resolve reject:reject];
+        [hcemoduleios respondApduWithSessionId:sessionId apduId:apduId rapdu:rapdu resolve:resolve reject:reject];
     } else {
-        reject(@"err_platform_unsupported", @"This iOS version does not support HCE.", nil);
+        reject(kUnsupportedCode, kUnsupportedMessage, nil);
     }
 }
 
-- (void)isHCERunning:(nonnull RCTPromiseResolveBlock)resolve reject:(nonnull RCTPromiseRejectBlock)reject {
-    if (@available(iOS 17.4, *)) {
-        [hcemoduleios isHCERunningWithResolve:resolve reject:reject];
-    } else {
-        reject(@"err_platform_unsupported", @"This iOS version does not support HCE.", nil);
-    }
+- (void)setBackgroundHandlerRegistered:(BOOL)registered allowWhenLocked:(BOOL)allowWhenLocked {
+    // background HCE is not supported on iOS, no-op
+}
+
+- (nonnull NSNumber *)backgroundSessionReady:(nonnull NSString *)sessionId {
+    // background HCE is not supported on iOS
+    return @NO;
 }
 
 + (NSString *)moduleName {

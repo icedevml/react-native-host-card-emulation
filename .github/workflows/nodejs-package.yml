@@ -7,19 +7,24 @@ on:
   release:
     types: [created]
 
+permissions:
+  contents: read
+
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-      - run: npm install -g corepack@0.34.5
-      - run: corepack enable
-      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 26
+      # Node.js 25+ doesn't bundle corepack, install it after setting up Node.js
+      - run: npm install -g corepack@0.36.0
+      - run: corepack enable
+      - run: yarn install --immutable
       - run: |
           cd packages/host-card-emulation
-          yarn
+          yarn test
       - run: |
           cd packages/host-card-emulation
           yarn pack
@@ -27,19 +32,19 @@ jobs:
   publish-npm:
     if: github.event.release
     needs: build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     environment: production
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-      - run: npm install -g corepack@0.34.5
-      - run: corepack enable
-      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
-      - run: yarn
+          node-version: 26
+      - run: npm install -g corepack@0.36.0
+      - run: corepack enable
+      - run: yarn install --immutable
       - run: |
           cd packages/host-card-emulation
           yarn npm publish --provenance --access public

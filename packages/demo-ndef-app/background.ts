@@ -1,25 +1,34 @@
 import { Buffer } from 'buffer/';
 
-import {
-  ProcessBackgroundHCEFunc,
-} from '@icedevml/react-native-host-card-emulation/js/hceBackground';
+import type { BackgroundHandlerFactory } from '@icedevml/react-native-host-card-emulation';
 import { createNDEFType4TagApp } from './ndefType4TagApp.ts';
+import { logApdu, logEvent } from './components/eventLog.ts';
 
+/*
+ Called once per interaction with the reader, so the NDEF tag state is never shared between
+ concurrent interactions.
+ */
+const createBackgroundHandler: BackgroundHandlerFactory = ({ sessionId, appState }) => {
+  const [_getNDEFAppState, _resetNDEFAppState, handleCAPDU] = createNDEFType4TagApp();
+  logEvent(`BackgroundHandlerFactory(${sessionId.slice(0, 8)}, ${appState})`, 'bg');
+  let deviceLocked: boolean | null = null;
 
-export default async function runBackgroundHCETask(processBackgroundHCE: ProcessBackgroundHCEFunc) {
-  const [_getNDEFAppState, _resetNDEFAppState, handleCAPDU] = createNDEFType4TagApp()
+  return {
+    onApdu: apdu => {
+      // only log the lock state of the first C-APDU and its changes
+      if (apdu.deviceLocked !== deviceLocked) {
+        deviceLocked = apdu.deviceLocked;
+        logEvent(`deviceLocked=${deviceLocked}`, 'bg');
+      }
 
-  processBackgroundHCE(async (event, respondAPDU, taskData) => {
-    console.log('background HCE event', event.type, 'handle', taskData.handle);
+      const command = Buffer.from(apdu.command);
+      const response = handleCAPDU(command);
+      logApdu(command, response, 'bg');
+      return response;
+    },
+    onReaderLost: () => logEvent('onReaderLost()', 'bg'),
+    onError: error => logEvent(`onError(${error})`, 'bg'),
+  };
+};
 
-    switch (event.type) {
-      case 'received':
-        const capdu = Buffer.from(event.arg!, 'hex');
-        await respondAPDU(handleCAPDU(capdu).toString("hex"));
-        break;
-
-      case 'readerDeselected':
-        break;
-    }
-  });
-}
+export default createBackgroundHandler;
