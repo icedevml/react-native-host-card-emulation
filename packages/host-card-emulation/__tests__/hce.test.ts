@@ -189,6 +189,44 @@ describe('foreground session', () => {
     expect(mockNative.invalidateSession).toHaveBeenCalledTimes(1);
   });
 
+  it('invalidates the native session again if the start was aborted before it was created', async () => {
+    const {HCE} = require('../js') as typeof import('../js');
+    const controller = new AbortController();
+    let resolveNative!: () => void;
+    mockNative.beginSession.mockImplementation(
+      () =>
+        new Promise<void>(resolve => {
+          resolveNative = resolve;
+        }),
+    );
+
+    const promise = HCE.beginSession({onApdu: () => [0x90, 0x00]}, {signal: controller.signal});
+    controller.abort();
+    resolveNative();
+
+    await expect(promise).rejects.toMatchObject({code: 'err_aborted'});
+    // once by invalidate(), once more after the native session was created
+    expect(mockNative.invalidateSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects with err_aborted when the native start fails because it was aborted', async () => {
+    const {HCE} = require('../js') as typeof import('../js');
+    const controller = new AbortController();
+    let rejectNative!: (error: Error) => void;
+    mockNative.beginSession.mockImplementation(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectNative = reject;
+        }),
+    );
+
+    const promise = HCE.beginSession({onApdu: () => [0x90, 0x00]}, {signal: controller.signal});
+    controller.abort();
+    rejectNative(Object.assign(new Error('invalidated'), {code: 'err_session_invalidated'}));
+
+    await expect(promise).rejects.toMatchObject({code: 'err_aborted'});
+  });
+
   it('cleans up when the native beginSession() fails', async () => {
     const {HCE} = require('../js') as typeof import('../js');
     const error = Object.assign(new Error('exists'), {code: 'err_session_exists'});

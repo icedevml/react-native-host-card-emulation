@@ -224,42 +224,57 @@ enum HexCoding {
   @objc public func beginSession(sessionId: NSString, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
     let sessionId = String(sessionId)
 
+    /*
+     Reserve the session slot right away, before the first `await`. The TurboModule calls the asynchronous
+     methods one after another on its method queue, so invalidateSession() called right after this method
+     (e.g. when the start is aborted) always finds the reservation instead of being lost.
+     */
+    let canStart = synchronized { () -> Bool in
+      if self.currentSession != nil || self.startingSessionId != nil {
+        return false
+      }
+
+      self.startingSessionId = sessionId
+      self.startingSessionInvalidateRequested = false
+      return true
+    }
+
+    guard canStart else {
+      reject("err_session_exists", "A session already exists.", nil)
+      return
+    }
+
+    // releases the reservation and rejects
+    let fail = { (code: String, message: String) in
+      self.synchronized { self.startingSessionId = nil }
+      reject(code, message, nil)
+    }
+
     Task.init {
       guard NFCReaderSession.readingAvailable else {
-        reject("err_nfc_reader_not_available", "Preflight check failed: NFCReaderSession.readingAvailable is false", nil)
+        fail("err_nfc_reader_not_available", "Preflight check failed: NFCReaderSession.readingAvailable is false")
         return
       }
 
       guard CardSession.isSupported else {
-        reject("err_card_session_unsupported", "Preflight check failed: CardSession.isSupported is false", nil)
+        fail("err_card_session_unsupported", "Preflight check failed: CardSession.isSupported is false")
         return
       }
 
       guard await CardSession.isEligible else {
-        reject("err_card_session_not_eligible", "Preflight check failed: CardSession.isEligible is false", nil)
-        return
-      }
-
-      // reserve the session slot atomically, so that concurrent calls can't both pass the check
-      let canStart = self.synchronized { () -> Bool in
-        if self.currentSession != nil || self.startingSessionId != nil {
-          return false
-        }
-
-        self.startingSessionId = sessionId
-        self.startingSessionInvalidateRequested = false
-        return true
-      }
-
-      guard canStart else {
-        reject("err_session_exists", "A session already exists.", nil)
+        fail("err_card_session_not_eligible", "Preflight check failed: CardSession.isEligible is false")
         return
       }
 
       // the previous session might still be ending, e.g. if it was invalidated right before this call
       guard await self.waitForPreviousSessionsToEnd() else {
-        self.synchronized { self.startingSessionId = nil }
-        reject("err_session_exists", "The previous session is still being closed.", nil)
+        fail("err_session_exists", "The previous session is still being closed.")
+        return
+      }
+
+      // invalidateSession() was called during the checks above, don't create the CardSession at all
+      guard !self.synchronized({ self.startingSessionInvalidateRequested }) else {
+        fail("err_session_invalidated", "The session was invalidated while it was being started.")
         return
       }
 
@@ -268,8 +283,7 @@ enum HexCoding {
       do {
         session = try await CardSession()
       } catch (let error) {
-        self.synchronized { self.startingSessionId = nil }
-        reject("err_create_card_session", "Failed to create CardSession: \(error)", nil)
+        fail("err_create_card_session", "Failed to create CardSession: \(error)")
         return
       }
 

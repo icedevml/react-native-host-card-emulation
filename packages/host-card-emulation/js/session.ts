@@ -17,6 +17,10 @@ function generateSessionId(): string {
   return `fg-${Date.now().toString(36)}-${sessionCounter.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function abortError(): HCEError {
+  return new HCEError('err_aborted', 'The operation was aborted.');
+}
+
 class Session implements HCESession {
   readonly id: string;
   readonly closed: Promise<string>;
@@ -163,7 +167,7 @@ export async function beginSession(handlers: SessionHandlers, options: BeginSess
   const {handlerTimeout, allowWhenLocked} = resolveHandlerOptions(options);
 
   if (signal?.aborted) {
-    throw new HCEError('err_aborted', 'The operation was aborted.');
+    throw abortError();
   }
 
   const session = new Session(generateSessionId(), handlers, handlerTimeout);
@@ -175,14 +179,25 @@ export async function beginSession(handlers: SessionHandlers, options: BeginSess
     await NativeHCEModule.beginSession(session.id, allowWhenLocked);
   } catch (e) {
     session.close('beginSessionFailed');
+
+    // e.g. iOS rejects with err_session_invalidated if the start was aborted
+    if (signal?.aborted) {
+      throw abortError();
+    }
+
     throw e;
+  }
+
+  if (!session.isActive) {
+    // closed while the native session was being created, make sure that it doesn't outlive the JS side
+    NativeHCEModule.invalidateSession(session.id);
   }
 
   try {
     await session.started;
   } catch (e) {
     if (signal?.aborted) {
-      throw new HCEError('err_aborted', 'The operation was aborted.');
+      throw abortError();
     }
 
     throw e;
