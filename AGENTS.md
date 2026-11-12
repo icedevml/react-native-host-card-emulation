@@ -122,9 +122,13 @@ tables, search for every occurrence when changing one.
 
 ## CI and releases
 
-- `.github/workflows/nodejs-package.yml`: every push runs `yarn install --immutable`, the library tests and
-  `yarn pack`. Creating a GitHub Release runs `publish-npm` (environment `production`, npm trusted publishing
-  with provenance). Never publish manually.
+- `.github/workflows/nodejs-package.yml`: every push runs `yarn install --immutable`, the type-check, the tests
+  and `npm pack --dry-run`. Creating a GitHub Release runs `publish-npm` (environment `production`, npm trusted
+  publishing with provenance). Never publish manually.
+- Supply chain: `publish-npm` holds the OIDC token that can publish the package, so it must never install
+  dependencies or run any third-party code: it publishes the tarball of `npm pack --ignore-scripts` (the package
+  has no build step). The install scripts of the dependencies are disabled (`enableScripts: false` in
+  `.yarnrc.yml`); if a dependency really needs its script, allow only that one through `dependenciesMeta`.
 - The version lives in `packages/host-card-emulation/package.json`, version bumps are separate PRs
   ("Bump version to X.Y.Z"). Work on a branch and open a PR against `master`.
 - GitHub Actions are pinned by commit SHA, keep it that way when updating them.
