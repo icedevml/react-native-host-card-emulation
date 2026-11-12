@@ -3,7 +3,7 @@ import { Alert, AppState, Text } from 'react-native';
 
 import { Buffer } from 'buffer/';
 
-import HCE, { HCESession } from '@icedevml/react-native-host-card-emulation';
+import HCE from '@icedevml/react-native-host-card-emulation';
 import { createNDEFType4TagApp } from '../ndefType4TagApp.ts';
 import { logApdu, logEvent } from './eventLog.ts';
 import EventLogView from './EventLogView.tsx';
@@ -66,37 +66,35 @@ function PresentmentHCEView({ setCurrentView }: IProps): React.JSX.Element {
         }
       }, 250);
 
-      let session: HCESession | null = null;
-
       try {
-        session = await HCE.beginSession(
+        await HCE.beginSession(
           {
-            onApdu: apdu => {
+            onApdu: (apdu, session) => {
               const command = Buffer.from(apdu.command);
               const response = handleCAPDU(command);
               logApdu(command, response);
 
               if (getNDEFAppState().wasNDEFRead) {
-                session?.setAlertMessage('Done. Untap smartphone from the reader.');
+                session.setAlertMessage('Done. Untap smartphone from the reader.');
               }
 
               return response;
             },
             // start HCE whenever the reader is detected, without any user interaction
-            onReaderDetected: async () => {
+            onReaderDetected: async session => {
               logEvent('onReaderDetected()');
               hceTriggered = true;
               resetNDEFAppState();
-              session?.setAlertMessage('Detected reader.');
-              await session?.startEmulation();
+              session.setAlertMessage('Detected reader.');
+              await session.startEmulation();
               logEvent('HCESession.startEmulation()');
             },
             // stop it with success whenever NDEF was read
-            onReaderLost: async () => {
+            onReaderLost: async session => {
               logEvent('onReaderLost()');
 
-              if (getNDEFAppState().wasNDEFRead && (await session?.isEmulationRunning())) {
-                await session?.stopEmulation('success');
+              if (getNDEFAppState().wasNDEFRead && (await session.isEmulationRunning())) {
+                await session.stopEmulation('success');
                 logEvent('HCESession.stopEmulation(success)');
                 hceTriggered = false;
               }

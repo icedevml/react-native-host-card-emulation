@@ -57,6 +57,8 @@ class Session implements HCESession {
   readonly started: Promise<void>;
 
   private readonly handlers: SessionHandlers;
+  // handlers.onError() bound to this session
+  private readonly onError: ((error: unknown) => void) | undefined;
   private readonly handlerTimeout: number;
   private readonly queue = new SerialQueue();
   private readonly removeListener: () => void;
@@ -72,6 +74,8 @@ class Session implements HCESession {
   constructor(id: string, handlers: SessionHandlers, handlerTimeout: number) {
     this.id = id;
     this.handlers = handlers;
+    const {onError} = handlers;
+    this.onError = onError ? error => onError(error, this) : undefined;
     this.handlerTimeout = handlerTimeout;
     this.closed = new Promise(resolve => {
       this.resolveClosed = resolve;
@@ -91,14 +95,14 @@ class Session implements HCESession {
     return this.active;
   }
 
-  private runHandler(name: string, handler: (() => unknown) | undefined) {
+  private runHandler(name: string, handler: ((session: HCESession) => unknown) | undefined) {
     if (!handler) {
       return;
     }
 
     this.queue
-      .push(() => callHandler(name, handler, this.handlerTimeout))
-      .catch(e => reportError(this.handlers.onError, e));
+      .push(() => callHandler(name, () => handler(this), this.handlerTimeout))
+      .catch(e => reportError(this.onError, e));
   }
 
   private handleEvent(event: NativeHCEEvent) {
@@ -118,11 +122,13 @@ class Session implements HCESession {
         this.releaseKeepAliveWaiters();
         break;
 
-      case 'apdu':
+      case 'apdu': {
+        const {onApdu} = this.handlers;
         this.queue.push(() =>
-          processApdu(this.id, event, this.handlers.onApdu, this.handlers.onError, this.handlerTimeout),
+          processApdu(this.id, event, apdu => onApdu(apdu, this), this.onError, this.handlerTimeout),
         );
         break;
+      }
 
       case 'sessionInvalidated':
         this.close(event.reason || 'unknown');
@@ -143,7 +149,7 @@ class Session implements HCESession {
       this.rejectStarted(new HCEError('err_session_invalidated', `The session was invalidated: ${reason}`));
     } else {
       const onInvalidated = this.handlers.onInvalidated;
-      this.runHandler('onInvalidated()', onInvalidated ? () => onInvalidated(reason) : undefined);
+      this.runHandler('onInvalidated()', onInvalidated ? session => onInvalidated(reason, session) : undefined);
     }
 
     activeSessions.delete(this.id);

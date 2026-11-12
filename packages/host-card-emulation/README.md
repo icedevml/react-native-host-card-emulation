@@ -176,8 +176,9 @@ const caps = await HCE.getCapabilities();
            // for the demo purposes, we always respond with [0x0A] + status code 0x9000 (success)
            return new Uint8Array([0x0A, 0x90, 0x00]);
        },
-       onReaderDetected: () => session.setAlertMessage('Reader detected'),  // only for iOS, no-op on Android
-       onReaderLost: () => session.setAlertMessage('Lost reader'),          // only for iOS, no-op on Android
+       // every handler receives the session as its last argument
+       onReaderDetected: (s) => s.setAlertMessage('Reader detected'),  // only for iOS, no-op on Android
+       onReaderLost: (s) => s.setAlertMessage('Lost reader'),          // only for iOS, no-op on Android
        onInvalidated: (reason) => console.log('session closed', reason),
        onError: (error) => console.warn('HCE handler error', error),
    });
@@ -187,6 +188,10 @@ const caps = await HCE.getCapabilities();
    ```
    `beginSession()` resolves once the session is started and ready for `startEmulation()`. Only a single session can be
    active at a time, `beginSession()` rejects with `err_session_exists` otherwise.
+
+   Every handler receives the session as its last argument: `onApdu(apdu, session)`, `onReaderDetected(session)`,
+   `onReaderLost(session)`, `onInvalidated(reason, session)` and `onError(error, session)`. Use it instead of
+   the variable that the result of `beginSession()` is assigned to, a handler might run before that assignment.
 
    The optional second argument accepts:
    ```typescript

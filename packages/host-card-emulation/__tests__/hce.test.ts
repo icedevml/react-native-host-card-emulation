@@ -55,7 +55,10 @@ describe('foreground session', () => {
     emit(event(session.id, 'apdu', {apduId: 7, command: '00A40400', deviceLocked: true}));
     await flush();
 
-    expect(onApdu).toHaveBeenCalledWith({id: 7, command: new Uint8Array([0x00, 0xa4, 0x04, 0x00]), deviceLocked: true});
+    expect(onApdu).toHaveBeenCalledWith(
+      {id: 7, command: new Uint8Array([0x00, 0xa4, 0x04, 0x00]), deviceLocked: true},
+      session,
+    );
     expect(mockNative.respondApdu).toHaveBeenCalledWith(session.id, 7, '0A9000');
     session.invalidate();
   });
@@ -147,7 +150,7 @@ describe('foreground session', () => {
     await flush();
 
     expect(onApdu).not.toHaveBeenCalled();
-    expect(onInvalidated).toHaveBeenCalledWith('userInvalidated');
+    expect(onInvalidated).toHaveBeenCalledWith('userInvalidated', session);
     expect(mockNative.respondApdu).toHaveBeenCalledWith(session.id, 3, '6F00');
   });
 
@@ -159,7 +162,7 @@ describe('foreground session', () => {
     await flush();
 
     await expect(session.closed).resolves.toBe('maxSessionDurationReached');
-    expect(onInvalidated).toHaveBeenCalledWith('maxSessionDurationReached');
+    expect(onInvalidated).toHaveBeenCalledWith('maxSessionDurationReached', session);
   });
 
   it('invalidates the session when aborted while starting', async () => {
@@ -236,7 +239,7 @@ describe('foreground session', () => {
     expect(mockNative.respondApdu).toHaveBeenNthCalledWith(1, session.id, 1, '6F00');
     expect(mockNative.respondApdu).toHaveBeenNthCalledWith(2, session.id, 2, '9000');
     expect(onError).toHaveBeenCalledTimes(1);
-    expect(onError).toHaveBeenCalledWith(expect.objectContaining({code: 'err_handler_timeout'}));
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({code: 'err_handler_timeout'}), session);
     session.invalidate();
   });
 
@@ -252,8 +255,40 @@ describe('foreground session', () => {
     session.invalidate();
     await sleep(50);
 
-    expect(onError).toHaveBeenCalledWith(expect.objectContaining({code: 'err_handler_timeout'}));
-    expect(onInvalidated).toHaveBeenCalledWith('userInvalidated');
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({code: 'err_handler_timeout'}), session);
+    expect(onInvalidated).toHaveBeenCalledWith('userInvalidated', session);
+  });
+
+  it('passes the session to every handler', async () => {
+    const received: unknown[] = [];
+    const session = await startSession({
+      onApdu: (_apdu, s) => {
+        received.push(s);
+        throw new Error('boom');
+      },
+      onReaderDetected: s => {
+        received.push(s);
+      },
+      onReaderLost: s => {
+        received.push(s);
+      },
+      onInvalidated: (_reason, s) => {
+        received.push(s);
+      },
+      onError: (_error, s) => {
+        received.push(s);
+      },
+    });
+
+    emit(event(session.id, 'readerDetected'));
+    emit(event(session.id, 'apdu', {apduId: 1, command: '00'}));
+    emit(event(session.id, 'readerLost'));
+    session.invalidate();
+    await flush();
+
+    // onReaderDetected(), onApdu(), onError(), onReaderLost(), onInvalidated()
+    expect(received).toHaveLength(5);
+    expect(received.every(s => s === session)).toBe(true);
   });
 
   it('passes allowWhenLocked to the native side', async () => {

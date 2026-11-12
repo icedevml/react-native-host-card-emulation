@@ -51,6 +51,10 @@ export type ApduHandler = (apdu: CommandAPDU) => ResponseAPDU | Promise<Response
 
 export type EmulationStopStatus = 'success' | 'failure';
 
+/**
+ * Every handler receives the session as its last argument, so it doesn't have to rely on the variable
+ * that the result of beginSession() is assigned to.
+ */
 export interface SessionHandlers {
   /**
    * Handle the C-APDU and return the R-APDU. Called sequentially, the next C-APDU is never
@@ -58,25 +62,25 @@ export interface SessionHandlers {
    * response or doesn't finish within the handler timeout, the reader receives the 6F00 status word
    * (no precise diagnosis).
    */
-  onApdu: ApduHandler;
+  onApdu: (apdu: CommandAPDU, session: HCESession) => ResponseAPDU | Promise<ResponseAPDU>;
   /**
    * iOS: The reader's field was detected.
    * Android: The reader has selected the application.
    */
-  onReaderDetected?: () => void | Promise<void>;
+  onReaderDetected?: (session: HCESession) => void | Promise<void>;
   /**
    * The reader was lost, a different application was selected by the reader or the emulation was stopped.
    */
-  onReaderLost?: () => void | Promise<void>;
+  onReaderLost?: (session: HCESession) => void | Promise<void>;
   /**
    * The session was closed and can't be used anymore.
    */
-  onInvalidated?: (reason: string) => void;
+  onInvalidated?: (reason: string, session: HCESession) => void;
   /**
    * Errors thrown by the handlers above (including the err_handler_timeout errors)
    * or by responding to a C-APDU. Logged with console.warn() if not provided.
    */
-  onError?: (error: unknown) => void;
+  onError?: (error: unknown, session: HCESession) => void;
 }
 
 export interface HandlerOptions {

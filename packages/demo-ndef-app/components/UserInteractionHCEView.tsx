@@ -57,42 +57,41 @@ function UserInteractionHCEView({ setCurrentView }: IProps): React.JSX.Element {
   async function doBeginSession() {
     const generation = ++generationRef.current;
     const isCurrent = () => generation === generationRef.current;
-    // the handlers only operate on their own session, never on the one that has replaced it
-    let session: HCESession | null = null;
 
     invalidateSession();
     setEmulating(true);
 
     try {
-      session = await HCE.beginSession({
-        onApdu: apdu => {
+      // the handlers receive their own session, never the one that has replaced it
+      const newSession = await HCE.beginSession({
+        onApdu: (apdu, session) => {
           const command = Buffer.from(apdu.command);
           const response = handleCAPDU(command);
           logApdu(command, response);
 
           if (getNDEFAppState().wasNDEFRead) {
-            session?.setAlertMessage('Successfully emulated NDEF!');
+            session.setAlertMessage('Successfully emulated NDEF!');
           }
 
           return response;
         },
-        onReaderDetected: () => {
+        onReaderDetected: session => {
           logEvent('onReaderDetected()');
           resetNDEFAppState();
-          session?.setAlertMessage('Reader detected');
+          session.setAlertMessage('Reader detected');
         },
-        onReaderLost: async () => {
+        onReaderLost: async session => {
           logEvent('onReaderLost()');
 
           if (getNDEFAppState().wasNDEFRead) {
-            await session?.stopEmulation('success');
+            await session.stopEmulation('success');
             logEvent('HCESession.stopEmulation(success)');
 
             if (isCurrent()) {
               setEmulating(false);
             }
           } else {
-            session?.setAlertMessage('Lost reader');
+            session.setAlertMessage('Lost reader');
           }
         },
         onInvalidated: reason => {
@@ -113,15 +112,15 @@ function UserInteractionHCEView({ setCurrentView }: IProps): React.JSX.Element {
 
       if (!isCurrent()) {
         // the user has stopped the emulation or left the view while the session was being started
-        session.invalidate();
+        newSession.invalidate();
         logEvent('HCESession.invalidate()');
         return;
       }
 
-      sessionRef.current = session;
+      sessionRef.current = newSession;
       logEvent('HCE.beginSession()');
-      session.setAlertMessage('Tap towards the reader');
-      await session.startEmulation();
+      newSession.setAlertMessage('Tap towards the reader');
+      await newSession.startEmulation();
       logEvent('HCESession.startEmulation()');
     } catch (error) {
       console.error('beginSession err', error);
