@@ -130,8 +130,8 @@ Afterwards, follow the subsections below for each platform that you need to supp
 ## API
 
 > [!NOTE]
-> Version 1.0 introduced a new API, which is not compatible with 0.x versions. See [Migrating from 0.x](#migrating-from-0x).
-> Version 2.0 made the defaults on Android secure, see [Migrating from 1.x](#migrating-from-1x).
+> Version 2.x has a new API, which is not compatible with 0.x versions, and secure defaults on Android.
+> See [Migrating to 2.x](#migrating-to-2x).
 
 ```typescript
 import HCE from '@icedevml/react-native-host-card-emulation';
@@ -222,7 +222,9 @@ const caps = await HCE.getCapabilities();
    ```
    `session.closed` is a promise that resolves with the reason once the session is closed (by you or by the OS),
    `onInvalidated` receives the same reason:
-   * `userInvalidated` - `session.invalidate()` was called (also through the `AbortSignal`);
+   * `userInvalidated` - `session.invalidate()` was called (also through the `AbortSignal`), or on iOS the user has
+     closed the system NFC prompt or the app has gone to background, e.g. the device was locked (these cases can't be
+     told apart);
    * iOS: the name of the `CardSession.Error` case that has ended the session, e.g. `maxSessionDurationReached`;
    * iOS: `internalError: <description>` if the session's event stream has failed, `unknown` if it has ended without
      a reason.
@@ -250,8 +252,27 @@ const caps = await HCE.getCapabilities();
 #### Events
 
 For the reader-related handlers, trigger mechanisms are platform dependent:
-* iOS: `onReaderDetected` is called as soon as the NFC reader's field presence is observed. `onReaderLost` is called if the reader is physically disconnected or a non-matching AID is selected by the reader.
+* iOS: `onReaderDetected` is called as soon as the NFC reader's field presence is observed. `onReaderLost` is called if the reader is physically disconnected or the emulation is stopped.
 * Android: `onReaderDetected` is called as soon as the first matching SELECT AID command is observed. `onReaderLost` is called if the reader is physically disconnected, a non-matching AID is selected by the reader or the emulation is stopped.
+
+iOS doesn't notify the app when the reader selects a non-matching AID: the system answers that SELECT with `6A82`
+itself and the following commands with `6A81` until the reader selects a matching AID again.
+
+#### iOS: The system NFC prompt and the session lifetime
+
+* While the emulation is running, the system NFC prompt covers the app and blocks its UI. Closing it ends the session
+  (`userInvalidated`), so does locking the device.
+* `stopEmulation('success')` shows a confirmation in the prompt, `stopEmulation('failure')` just closes it without any
+  indication of the failure. Use `session.setAlertMessage()` before stopping the emulation, or your own UI after it.
+* Invalidating the session while the emulation is running (also by reloading the JS bundle) shows an error in the
+  prompt. Call `stopEmulation('success')` first to finish without it.
+* The system ends the session (`maxSessionDurationReached`) about a minute after the last `startEmulation()` call.
+* A session that waits for the reader with exclusive NFC access (see below) without starting the emulation isn't
+  notified when that access expires: it detects no reader anymore and the system doesn't end it. Invalidate it once
+  `HCE.isExclusiveNFC()` becomes `false`.
+* Starting the emulation again right after `stopEmulation()` while the device is still at the reader might leave the
+  link with the reader unusable (the system answers the C-APDUs with `6A81`). Wait for the reader to be removed or
+  begin a new session.
 
 The `deviceLocked` flag of each C-APDU:
 * iOS: Always `false` - it's impossible to communicate over HCE while the device is locked.
@@ -284,7 +305,7 @@ While both session and exclusive NFC access are active, `onReaderDetected` is ca
 
 This function will throw an exception if:
 * the presentment intent assertion was already acquired and is still active;
-* you are in the cooldown period where you are not allowed to acquire the presentment intent assertion (cooldown is 15 seconds after the previous assertion had expired);
+* you are in the cooldown period where you are not allowed to acquire the presentment intent assertion (cooldown is 15 seconds after the previous assertion has ended - expired, released with `HCE.releaseExclusiveNFC()` or revoked when the app went to background), it rejects with `err_acquire_presentment` then;
 * the feature is not supported or the device is not eligible for whatever reason (rejects with `err_platform_unsupported` on Android).
 
 You can check if you are holding an exclusive NFC access by calling `HCE.isExclusiveNFC()`. Whenever you don't need the exclusive NFC access anymore, call `HCE.releaseExclusiveNFC()`.
@@ -295,8 +316,10 @@ You can check if you are holding an exclusive NFC access by calling `HCE.isExclu
 
 > [!TIP]
 > Use the React's [AppState](https://reactnative.dev/docs/appstate) listener to see when your app goes out to background
-> and call `HCE.releaseExclusiveNFC()` in such event. The operating system is not going to enforce your exclusive NFC access
-> anyway, as your app has gone to background.
+> and call `HCE.releaseExclusiveNFC()` in such event. The operating system revokes your exclusive NFC access anyway,
+> as your app has gone to background. Note that the device might auto-lock while the app waits for the reader with
+> exclusive NFC access (no system prompt is displayed then), which also revokes it. Right after the device is unlocked,
+> `acquireExclusiveNFC()` and `beginSession()` might briefly reject with `err_card_session_not_eligible`.
 
 ### Android: Enabling the background handler and the lock screen
 
@@ -484,22 +507,11 @@ try {
 | `err_nfc_reader_not_available`, `err_card_session_unsupported`, `err_card_session_not_eligible`, `err_create_card_session` | iOS: Preflight checks or session creation failed. |
 | `err_already_exists`, `err_acquire_presentment` | iOS: `acquireExclusiveNFC()` failed. |
 
-### Migrating from 1.x
+### Migrating to 2.x
 
-Version 2.0 doesn't change the API, but it makes the defaults on Android secure. Enable what your app needs, see
-[Android: Enabling the background handler and the lock screen](#android-enabling-the-background-handler-and-the-lock-screen).
+Version 2.x has a new API, which is not compatible with 0.x versions:
 
-| 1.x | 2.0 |
-|---|---|
-| The background handler is always enabled, a reader starts the app in background even when it has no background handler | Disabled by default, enable it with the `com.itsecrnd.rtnhceandroid.background_handler_enabled` meta-data of `HCEService` |
-| `allowWhenLocked: true` by default | `allowWhenLocked: false` by default |
-| `android:requireDeviceUnlock="false"` recommended | `android:requireDeviceUnlock="true"` recommended, unless the app is meant to work on the lock screen |
-| `getCapabilities().backgroundSupported`: the device supports the background handler | ... and it's enabled in `AndroidManifest.xml` |
-| The events still waiting in the queue of a closed session are delivered to the handlers | They are dropped, only `onInvalidated` is called |
-
-### Migrating from 0.x
-
-| 0.x | 1.0 |
+| 0.x | 2.x |
 |---|---|
 | `import NativeHCEModule from '.../js/NativeHCEModule'` | `import HCE from '@icedevml/react-native-host-card-emulation'` |
 | `isPlatformSupported()` | `await HCE.getCapabilities()` |
@@ -512,8 +524,16 @@ Version 2.0 doesn't change the API, but it makes the defaults on Android secure.
 | `setSessionAlertMessage()` / `invalidateSession()` | `session.setAlertMessage()` / `session.invalidate()` |
 | `registerHeadlessTask('handleBackgroundHCECall', ...)` + `createBackgroundHCE()` | `HCE.registerBackgroundHandler(factory)` |
 
-Note that on Android, the background handler is now also used when the app is in foreground without an active session
-(0.x has responded with `6999` in such case).
+The behavior has changed too, most notably the defaults on Android are secure. Enable what your app needs, see
+[Android: Enabling the background handler and the lock screen](#android-enabling-the-background-handler-and-the-lock-screen).
+
+| 0.x | 2.x |
+|---|---|
+| Android: a reader always starts the app in background | The background handler is disabled by default, enable it with the `com.itsecrnd.rtnhceandroid.background_handler_enabled` meta-data of `HCEService` |
+| Android: the C-APDUs are delivered also while the device is locked | Only while it's unlocked, unless `allowWhenLocked: true` is passed |
+| `android:requireDeviceUnlock="false"` recommended | `android:requireDeviceUnlock="true"` recommended, unless the app is meant to work on the lock screen |
+| Android: in foreground without an active session, the reader receives `6999` | The background handler is used (if enabled), otherwise the reader receives `6A82` / `6985` |
+| iOS: `readerDeselected` isn't emitted when the emulation is stopped | `onReaderLost` is called, like on Android |
 
 ### More resources
 

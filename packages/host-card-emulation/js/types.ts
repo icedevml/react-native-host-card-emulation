@@ -74,12 +74,14 @@ export interface SessionHandlers {
    */
   onReaderDetected?: (session: HCESession) => void | Promise<void>;
   /**
-   * The reader was lost, a different application was selected by the reader or the emulation was stopped.
+   * The reader was lost or the emulation was stopped.
+   * Android: Also when the reader has selected a different application (iOS doesn't report that).
    */
   onReaderLost?: (session: HCESession) => void | Promise<void>;
   /**
    * The session was closed and can't be used anymore. The reason:
-   * - 'userInvalidated': session.invalidate() was called (also through the AbortSignal);
+   * - 'userInvalidated': session.invalidate() was called (also through the AbortSignal), or on iOS the user has
+   *   closed the system NFC prompt or the app has gone to background;
    * - iOS: the name of the CardSession.Error case that has ended the session, e.g. 'maxSessionDurationReached';
    * - iOS: 'internalError: <description>' if the session's event stream has failed, 'unknown' if it has ended
    *   without a reason.
