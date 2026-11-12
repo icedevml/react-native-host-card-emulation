@@ -47,7 +47,9 @@ react {
     //   The hermes compiler command to run. By default it is 'hermesc'
     // hermesCommand = "$rootDir/my-custom-hermesc/bin/hermesc"
     //
-    hermesCommand = "../../node_modules/react-native/sdks/hermesc/%OS-BIN%/hermesc"
+    //   Relative to the demo's directory: the hermes-compiler package is hoisted to the root of the monorepo,
+    //   where the plugin doesn't look for it.
+    hermesCommand = "../../node_modules/hermes-compiler/hermesc/%OS-BIN%/hermesc"
 
     //   The list of flags to pass to the Hermes compiler. By default is "-O", "-output-source-map"
     // hermesFlags = ["-O", "-output-source-map"]
