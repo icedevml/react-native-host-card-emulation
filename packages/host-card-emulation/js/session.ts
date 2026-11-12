@@ -1,3 +1,5 @@
+import {AppRegistry, Platform} from 'react-native';
+
 import NativeHCEModule, {NativeHCEEvent} from './NativeHCEModule';
 import {
   addSessionListener,
@@ -10,7 +12,22 @@ import {
 } from './internal';
 import type {BeginSessionOptions, EmulationStopStatus, HCESession, SessionHandlers} from './types';
 
+// must match HCEManager.KEEP_ALIVE_TASK_KEY on the native side
+const KEEP_ALIVE_TASK_KEY = 'keepAliveHCESession';
+
+interface KeepAliveTaskData {
+  sessionId?: string;
+  // the number of the interaction with the reader within the session, counted from 1
+  interaction?: number;
+}
+
+interface KeepAliveWaiter {
+  interaction: number;
+  resolve: () => void;
+}
+
 let sessionCounter = 0;
+const activeSessions = new Map<string, Session>();
 
 function generateSessionId(): string {
   sessionCounter += 1;
@@ -19,6 +36,19 @@ function generateSessionId(): string {
 
 function abortError(): HCEError {
   return new HCEError('err_aborted', 'The operation was aborted.');
+}
+
+if (Platform.OS === 'android') {
+  /*
+   React Native pauses the JS timers while the app isn't resumed, unless a headless task is running.
+   The native side starts this task for every interaction with the reader handled by a session, so that
+   the handlers (and their timeouts) work also while the app is in background. The task finishes once
+   the handlers of that interaction have finished.
+   */
+  AppRegistry.registerHeadlessTask(KEEP_ALIVE_TASK_KEY, () => async (data: KeepAliveTaskData) => {
+    const session = data?.sessionId ? activeSessions.get(data.sessionId) : undefined;
+    await session?.waitForInteractionEnd(data.interaction ?? 0);
+  });
 }
 
 class Session implements HCESession {
@@ -32,6 +62,9 @@ class Session implements HCESession {
   private readonly removeListener: () => void;
   private active = true;
   private isStarted = false;
+  // the number of the interactions with the reader that have ended (readerLost events)
+  private interactionsEnded = 0;
+  private keepAliveWaiters: KeepAliveWaiter[] = [];
   private resolveClosed!: (reason: string) => void;
   private resolveStarted!: () => void;
   private rejectStarted!: (error: Error) => void;
@@ -51,6 +84,7 @@ class Session implements HCESession {
     this.started.catch(() => {});
     // registered before the native session is created, so that no event can be missed
     this.removeListener = addSessionListener(id, event => this.handleEvent(event));
+    activeSessions.set(id, this);
   }
 
   get isActive(): boolean {
@@ -79,7 +113,9 @@ class Session implements HCESession {
         break;
 
       case 'readerLost':
+        this.interactionsEnded += 1;
         this.runHandler('onReaderLost()', this.handlers.onReaderLost);
+        this.releaseKeepAliveWaiters();
         break;
 
       case 'apdu':
@@ -110,7 +146,31 @@ class Session implements HCESession {
       this.runHandler('onInvalidated()', onInvalidated ? () => onInvalidated(reason) : undefined);
     }
 
+    activeSessions.delete(this.id);
+    this.releaseKeepAliveWaiters();
     this.resolveClosed(reason);
+  }
+
+  /**
+   * Resolves once the handlers of the given interaction with the reader have finished or the session is closed.
+   */
+  waitForInteractionEnd(interaction: number): Promise<void> {
+    return new Promise(resolve => {
+      this.keepAliveWaiters.push({interaction, resolve});
+      this.releaseKeepAliveWaiters();
+    });
+  }
+
+  private releaseKeepAliveWaiters() {
+    const ended = this.keepAliveWaiters.filter(w => !this.active || w.interaction <= this.interactionsEnded);
+
+    if (ended.length === 0) {
+      return;
+    }
+
+    this.keepAliveWaiters = this.keepAliveWaiters.filter(w => !ended.includes(w));
+    // after the handlers that are already queued
+    this.queue.push(() => ended.forEach(w => w.resolve()));
   }
 
   private ensureActive() {

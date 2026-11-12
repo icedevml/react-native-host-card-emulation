@@ -36,6 +36,8 @@ final class HCEManager {
     private static final String TAG = "HCEManager";
 
     static final String BACKGROUND_TASK_KEY = "handleBackgroundHCECall";
+    // must match KEEP_ALIVE_TASK_KEY in js/session.ts
+    static final String KEEP_ALIVE_TASK_KEY = "keepAliveHCESession";
 
     // ISO 7816-4: file or application not found (response to SELECT that can't be served)
     private static final byte[] SW_APPLICATION_NOT_FOUND = {(byte) 0x6A, (byte) 0x82};
@@ -61,6 +63,8 @@ final class HCEManager {
         final RTNHCEAndroidModule module;
         final boolean allowWhenLocked;
         boolean emulationRunning;
+        // the number of the interactions with the reader handled so far
+        int interactions;
 
         ForegroundSession(String id, RTNHCEAndroidModule module, boolean allowWhenLocked) {
             this.id = id;
@@ -247,6 +251,8 @@ final class HCEManager {
 
             a.ready = true;
             fg.module.emitEvent(fg.id, "readerDetected");
+            fg.interactions++;
+            startKeepAliveTask(fg.module, fg.id, fg.interactions);
             return a;
         }
 
@@ -395,6 +401,33 @@ final class HCEManager {
         } catch (RuntimeException | AssertionError e) {
             Log.e(TAG, "startBackgroundTask: failed to start the headless task", e);
             rejectActivation(a);
+        }
+    }
+
+    /**
+     * React Native pauses the JS timers while the app isn't resumed, unless a headless task is running.
+     * Keep them running while the session handles the interaction, so that its handlers (and their timeouts)
+     * work also while the app is in background. The JS side finishes the task once the handlers
+     * of the interaction have finished.
+     */
+    // must be called on the main thread
+    private void startKeepAliveTask(RTNHCEAndroidModule module, String sessionId, int interaction) {
+        ReactContext context = module.getContext();
+
+        if (!context.hasActiveReactInstance()) {
+            return;
+        }
+
+        Bundle data = new Bundle();
+        data.putString("sessionId", sessionId);
+        data.putInt("interaction", interaction);
+
+        try {
+            HeadlessJsTaskContext.getInstance(context).startTask(
+                    new HeadlessJsTaskConfig(KEEP_ALIVE_TASK_KEY, Arguments.fromBundle(data), 0, true));
+        } catch (RuntimeException | AssertionError e) {
+            // not fatal, the timers only stop while the app isn't resumed
+            Log.w(TAG, "startKeepAliveTask: failed to start the headless task", e);
         }
     }
 

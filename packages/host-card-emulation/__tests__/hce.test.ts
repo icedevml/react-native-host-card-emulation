@@ -441,13 +441,20 @@ describe('background handler declaration', () => {
   }
 
   it('declares that there is no background handler once the entry file was evaluated', async () => {
-    loadIsolated(() => {});
-    expect(mockNative.setBackgroundHandlerRegistered).not.toHaveBeenCalled();
+    // JS timers don't fire while the app is started in background, the declaration must not depend on them
+    jest.useFakeTimers();
 
-    await nextTick();
+    try {
+      loadIsolated(() => {});
+      expect(mockNative.setBackgroundHandlerRegistered).not.toHaveBeenCalled();
 
-    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenCalledTimes(1);
-    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenCalledWith(false, true);
+      await Promise.resolve();
+
+      expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenCalledTimes(1);
+      expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenCalledWith(false, true);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('only declares the handler registered by the entry file', async () => {
@@ -455,5 +462,92 @@ describe('background handler declaration', () => {
     await nextTick();
 
     expect(mockNative.setBackgroundHandlerRegistered.mock.calls).toEqual([[true, true]]);
+  });
+});
+
+describe('keep-alive task (Android)', () => {
+  let keepAlive: (data: object) => Promise<void>;
+  let HCE: typeof import('../js').HCE;
+
+  beforeAll(() => {
+    jest.isolateModules(() => {
+      const {AppRegistry, Platform} = require('react-native');
+      Platform.OS = 'android';
+      jest.spyOn(AppRegistry, 'registerHeadlessTask').mockImplementation((...args: unknown[]) => {
+        if (args[0] === 'keepAliveHCESession') {
+          keepAlive = (args[1] as () => typeof keepAlive)();
+        }
+      });
+      HCE = (require('../js') as typeof import('../js')).HCE;
+    });
+  });
+
+  function beginSession(handlers: Parameters<typeof HCE.beginSession>[0]) {
+    mockNative.beginSession.mockImplementation((id: string) => {
+      setImmediate(() => emit(event(id, 'sessionStarted')));
+      return Promise.resolve();
+    });
+    return HCE.beginSession(handlers);
+  }
+
+  it('finishes once the handlers of the interaction have finished', async () => {
+    let releaseReaderLost!: () => void;
+    const session = await beginSession({
+      onApdu: () => [0x90, 0x00],
+      onReaderLost: () =>
+        new Promise<void>(resolve => {
+          releaseReaderLost = resolve;
+        }),
+    });
+
+    let finished = false;
+    emit(event(session.id, 'readerDetected'));
+    const task = keepAlive({sessionId: session.id, interaction: 1}).then(() => {
+      finished = true;
+    });
+    emit(event(session.id, 'apdu', {apduId: 1, command: '00'}));
+    emit(event(session.id, 'readerLost'));
+    await flush();
+
+    // onReaderLost() is still running
+    expect(finished).toBe(false);
+
+    releaseReaderLost();
+    await task;
+    session.invalidate();
+  });
+
+  it('waits for the end of its own interaction', async () => {
+    const session = await beginSession({onApdu: () => [0x90, 0x00]});
+
+    emit(event(session.id, 'readerDetected'));
+    emit(event(session.id, 'readerLost'));
+    await flush();
+
+    // the first interaction has already ended, the task finishes right away
+    await keepAlive({sessionId: session.id, interaction: 1});
+
+    let finished = false;
+    const task = keepAlive({sessionId: session.id, interaction: 2}).then(() => {
+      finished = true;
+    });
+    await flush();
+    expect(finished).toBe(false);
+
+    emit(event(session.id, 'readerDetected'));
+    emit(event(session.id, 'readerLost'));
+    await task;
+    session.invalidate();
+  });
+
+  it('finishes when the session is closed or unknown', async () => {
+    const session = await beginSession({onApdu: () => [0x90, 0x00]});
+    const task = keepAlive({sessionId: session.id, interaction: 1});
+
+    session.invalidate();
+
+    await task;
+    await keepAlive({sessionId: session.id, interaction: 1});
+    await keepAlive({sessionId: 'unknown', interaction: 1});
   });
 });

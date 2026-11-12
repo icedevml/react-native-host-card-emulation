@@ -65,6 +65,9 @@ also an Apple HCE entitlement (EEA). Native changes can usually only be compiled
   C-APDUs of sessions nobody listens to are answered with `6F00` by JS.
 - The handlers of one session (or one background interaction) run one at a time through `SerialQueue`,
   each call is bounded by `handlerTimeout` (default 10 s).
+- Android: every interaction handled by a foreground session runs under the headless JS task
+  `keepAliveHCESession` (the key is duplicated in `js/session.ts` and `HCEManager.java`), which keeps JS timers
+  running while the app is in background. JS finishes it once the handlers of that interaction have finished.
 - Android: an activation is the link with a reader from the first C-APDU until `onDeactivated()`. Routing is
   decided when it starts: foreground session with running emulation, else the background handler (headless
   JS task `handleBackgroundHCECall`, the key is duplicated in `js/background.ts` and `HCEManager.java`), else
@@ -84,7 +87,8 @@ also an Apple HCE entitlement (EEA). Native changes can usually only be compiled
   native queue. Methods returning a value (`isExclusiveNFC()`, `backgroundSessionReady()`) run synchronously
   on the JS thread, so they are not ordered with the asynchronous ones.
 - On Android, JS timers (`setTimeout`) are paused while the app is not resumed, unless a headless JS task
-  is running. Promises and native events still work.
+  is running. Promises and native events still work. Don't make anything that runs in background depend
+  on a timer (e.g. the background handler declaration uses a microtask).
 - `KeyguardManager.isDeviceLocked()` is `false` on devices without a secure lock screen.
 
 ## Changing the native API

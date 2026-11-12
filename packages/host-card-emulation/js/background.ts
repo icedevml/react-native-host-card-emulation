@@ -32,13 +32,14 @@ if (Platform.OS === 'android') {
   /*
    Until the JS side declares whether it has a background handler, the native side holds the
    interactions instead of rejecting them, as React Native might still be evaluating the bundle.
-   The handler is registered at the top level of the entry file, so the timer fires after that.
+   The handler is registered at the top level of the entry file and the microtask runs once the whole
+   bundle has been evaluated. A timer wouldn't do: timers don't fire while the app is started in background.
    */
-  setTimeout(() => {
+  Promise.resolve().then(() => {
     if (!taskRegistered) {
       NativeHCEModule.setBackgroundHandlerRegistered(false, true);
     }
-  }, 0);
+  });
 }
 
 interface BackgroundTaskData {
