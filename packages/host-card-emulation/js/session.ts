@@ -4,11 +4,13 @@ import NativeHCEModule, {type NativeHCEEvent} from './NativeHCEModule';
 import {
   addSessionListener,
   callHandler,
+  callNative,
   HCEError,
   processApdu,
   reportError,
   resolveHandlerOptions,
   SerialQueue,
+  toHCEError,
 } from './internal';
 import type {BeginSessionOptions, EmulationStopStatus, HCESession, SessionHandlers} from './types';
 
@@ -187,12 +189,12 @@ class Session implements HCESession {
 
   async startEmulation(): Promise<void> {
     this.ensureActive();
-    await NativeHCEModule.startEmulation(this.id);
+    await callNative(NativeHCEModule.startEmulation(this.id));
   }
 
   async stopEmulation(status: EmulationStopStatus = 'success'): Promise<void> {
     this.ensureActive();
-    await NativeHCEModule.stopEmulation(this.id, status);
+    await callNative(NativeHCEModule.stopEmulation(this.id, status));
   }
 
   async isEmulationRunning(): Promise<boolean> {
@@ -200,7 +202,7 @@ class Session implements HCESession {
       return false;
     }
 
-    return NativeHCEModule.isEmulationRunning(this.id);
+    return callNative(NativeHCEModule.isEmulationRunning(this.id));
   }
 
   setAlertMessage(message: string): void {
@@ -251,7 +253,7 @@ export async function beginSession(handlers: SessionHandlers, options: BeginSess
       throw abortError();
     }
 
-    throw e;
+    throw toHCEError(e);
   }
 
   if (!session.isActive) {

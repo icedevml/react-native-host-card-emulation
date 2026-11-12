@@ -216,12 +216,38 @@ describe('foreground session', () => {
     await expect(promise).rejects.toMatchObject({code: 'err_aborted'});
   });
 
-  it('cleans up when the native beginSession() fails', async () => {
-    const {HCE} = require('../js') as typeof import('../js');
+  it('converts the error to HCEError when the native beginSession() fails', async () => {
+    const {HCE, HCEError} = require('../js') as typeof import('../js');
     const error = Object.assign(new Error('exists'), {code: 'err_session_exists'});
     mockNative.beginSession.mockImplementation(() => Promise.reject(error));
 
-    await expect(HCE.beginSession({onApdu: () => [0x90, 0x00]})).rejects.toBe(error);
+    const promise = HCE.beginSession({onApdu: () => [0x90, 0x00]});
+
+    await expect(promise).rejects.toBeInstanceOf(HCEError);
+    await expect(promise).rejects.toMatchObject({code: 'err_session_exists', message: 'exists', cause: error});
+  });
+
+  it('converts the errors of the other native calls to HCEError', async () => {
+    const {HCE, HCEError} = require('../js') as typeof import('../js');
+    const nativeError = (code: string) => Object.assign(new Error(code), {code});
+    const onError = jest.fn();
+    const session = await startSession({onApdu: () => [0x90, 0x00], onError});
+
+    mockNative.startEmulation.mockRejectedValueOnce(nativeError('err_start_emulation'));
+    await expect(session.startEmulation()).rejects.toBeInstanceOf(HCEError);
+
+    mockNative.acquireExclusiveNFC.mockRejectedValueOnce(nativeError('err_already_exists'));
+    await expect(HCE.acquireExclusiveNFC()).rejects.toBeInstanceOf(HCEError);
+
+    // passed to onError()
+    mockNative.respondApdu.mockRejectedValueOnce(nativeError('err_apdu_respond'));
+    emit(event(session.id, 'apdu', {apduId: 1, command: '00'}));
+    await flush();
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(expect.any(HCEError), session);
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({code: 'err_apdu_respond'}), session);
+    session.invalidate();
   });
 
   it('responds with 6F00 when onApdu() times out and delivers the next C-APDU', async () => {

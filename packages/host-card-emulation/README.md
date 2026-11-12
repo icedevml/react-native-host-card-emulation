@@ -387,18 +387,35 @@ for a complete example.
 
 ### Error codes
 
-Promises returned by the library reject with errors having a `code` property:
+The errors of the library (rejected promises and the errors it passes to `onError`) are `HCEError` instances with
+a `code` property. The errors of the native side are converted to `HCEError` as well, keeping the original error
+as `cause`. Errors thrown by your own handlers are passed to `onError` as they are.
+
+```typescript
+import HCE, { HCEError } from '@icedevml/react-native-host-card-emulation';
+
+try {
+    await HCE.beginSession(handlers);
+} catch (e) {
+    if (e instanceof HCEError && e.code === 'err_session_exists') {
+        // ...
+    }
+}
+```
 
 | Code | Meaning |
 |---|---|
 | `err_platform_unsupported` | The device or the OS doesn't support the requested feature. |
 | `err_invalid_argument` | Invalid handlers or options were passed. |
 | `err_handler_timeout` | Passed to `onError`: a handler hasn't finished within the handler timeout. |
+| `err_invalid_rapdu` | Passed to `onError`: `onApdu` has returned an invalid R-APDU (not bytes, or shorter than the 2-byte status word), the reader has received `6F00`. |
+| `err_invalid_hex` | `hexToBytes()` has received an invalid hex string. |
 | `err_session_exists` | Another session is already active. |
 | `err_no_session` | The session is not active anymore. |
 | `err_session_invalidated` | The session was invalidated while it was being started. |
 | `err_aborted` | `beginSession()` was aborted through the `AbortSignal`. |
 | `err_start_emulation` | iOS: The OS has refused to start the emulation. |
+| `err_apdu_respond` | iOS, passed to `onError`: The OS has failed to send the R-APDU to the reader. |
 | `err_nfc_reader_not_available`, `err_card_session_unsupported`, `err_card_session_not_eligible`, `err_create_card_session` | iOS: Preflight checks or session creation failed. |
 | `err_already_exists`, `err_acquire_presentment` | iOS: `acquireExclusiveNFC()` failed. |
 

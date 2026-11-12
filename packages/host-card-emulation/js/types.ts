@@ -77,8 +77,8 @@ export interface SessionHandlers {
    */
   onInvalidated?: (reason: string, session: HCESession) => void;
   /**
-   * Errors thrown by the handlers above (including the err_handler_timeout errors)
-   * or by responding to a C-APDU. Logged with console.warn() if not provided.
+   * Errors thrown by the handlers above (as they are) and the library's errors (HCEError: err_handler_timeout,
+   * err_invalid_rapdu, failures of responding to a C-APDU). Logged with console.warn() if not provided.
    */
   onError?: (error: unknown, session: HCESession) => void;
 }

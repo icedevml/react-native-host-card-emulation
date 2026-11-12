@@ -109,7 +109,8 @@ tables, search for every occurrence when changing one.
   lines up to ~120 characters. The demo follows its `.prettierrc.js` (spaces inside braces). Java: 4 spaces,
   Swift: 2 spaces.
 - Comments explain why (threading, ordering, platform quirks), not what.
-- JS errors are `HCEError` instances with a `code`, native rejections use the same `err_*` codes.
+- Errors reaching the app are `HCEError` instances with a `code`. Native rejections use the same `err_*` codes
+  and JS converts them with `callNative()` / `toHCEError()` (`js/internal.ts`), wrap every new native call too.
 - Never log APDU contents in the library: `console.log()` and logcat are readable in release builds.
   The demo logs them on purpose (documented in its README).
 - Cover JS behavior changes with tests in `__tests__/hce.test.ts`. The native module is replaced there by

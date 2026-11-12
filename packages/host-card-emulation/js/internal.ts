@@ -21,6 +21,32 @@ export class HCEError extends Error {
   }
 }
 
+/**
+ * The native side rejects with plain errors having a `code`, turn them into HCEError (keeping the original
+ * error as `cause`), so that the apps can rely on `instanceof HCEError`.
+ */
+export function toHCEError(error: unknown): unknown {
+  if (error instanceof HCEError || typeof error !== 'object' || error === null) {
+    return error;
+  }
+
+  const {code, message} = error as {code?: unknown; message?: unknown};
+
+  if (typeof code !== 'string') {
+    return error;
+  }
+
+  const hceError = new HCEError(code, typeof message === 'string' ? message : code);
+  hceError.cause = error;
+  return hceError;
+}
+
+export function callNative<T>(promise: Promise<T>): Promise<T> {
+  return promise.catch(e => {
+    throw toHCEError(e);
+  });
+}
+
 export function bytesToHex(bytes: ResponseAPDU): string {
   let out = '';
 
@@ -179,7 +205,7 @@ export async function processApdu(
   } catch (e) {
     // the reader was lost or the session was closed in the meantime, that's expected
     if (!isErrorCode(e, 'err_stale_apdu')) {
-      reportError(onError, e);
+      reportError(onError, toHCEError(e));
     }
   }
 }

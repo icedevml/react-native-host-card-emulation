@@ -1,11 +1,11 @@
 import NativeHCEModule from './NativeHCEModule';
 import {registerBackgroundHandler, unregisterBackgroundHandler} from './background';
-import {bytesToHex, HCEError, hexToBytes} from './internal';
+import {bytesToHex, callNative, HCEError, hexToBytes} from './internal';
 import {beginSession} from './session';
 import type {HCECapabilities, HCEPlatform} from './types';
 
 async function getCapabilities(): Promise<HCECapabilities> {
-  const caps = await NativeHCEModule.getCapabilities();
+  const caps = await callNative(NativeHCEModule.getCapabilities());
 
   return {
     platform: caps.platform as HCEPlatform,
@@ -30,7 +30,7 @@ export const HCE = {
    * iOS: Acquire NFCPresentmentIntentAssertion (exclusive NFC access for a limited time).
    * Android: Not supported, rejects with err_platform_unsupported.
    */
-  acquireExclusiveNFC: (): Promise<void> => NativeHCEModule.acquireExclusiveNFC(),
+  acquireExclusiveNFC: (): Promise<void> => callNative(NativeHCEModule.acquireExclusiveNFC()),
   /**
    * iOS: Release NFCPresentmentIntentAssertion.
    * Android: No-op.
