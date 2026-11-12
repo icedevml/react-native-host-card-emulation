@@ -12,6 +12,7 @@
   },
   "files": [
     "js",
+    "jest",
     "android",
     "ios",
     "RTNHCEModuleIOS.podspec",

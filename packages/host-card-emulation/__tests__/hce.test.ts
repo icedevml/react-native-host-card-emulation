@@ -1,39 +1,15 @@
 import type {NativeHCEEvent} from '../js/NativeHCEModule';
+// the native module is replaced with this mock by jest/setup.js (see jest.config.js)
+import * as NativeHCEModuleMock from '../jest/NativeHCEModuleMock';
 
-type Listener = (event: NativeHCEEvent) => void;
-
-const mockNative = {
-  listener: null as Listener | null,
-  onEvent: jest.fn((listener: Listener) => {
-    mockNative.listener = listener;
-    return {remove: jest.fn()};
-  }),
-  getCapabilities: jest.fn(),
-  beginSession: jest.fn(),
-  invalidateSession: jest.fn(),
-  setSessionAlertMessage: jest.fn(),
-  startEmulation: jest.fn(() => Promise.resolve()),
-  stopEmulation: jest.fn(() => Promise.resolve()),
-  isEmulationRunning: jest.fn(() => Promise.resolve(false)),
-  respondApdu: jest.fn(() => Promise.resolve()),
-  acquireExclusiveNFC: jest.fn(),
-  releaseExclusiveNFC: jest.fn(),
-  isExclusiveNFC: jest.fn(() => false),
-  setBackgroundHandlerRegistered: jest.fn(),
-  backgroundSessionReady: jest.fn(() => true),
-};
-
-jest.mock('../js/NativeHCEModule', () => ({
-  __esModule: true,
-  default: mockNative,
-}));
+const mockNative = NativeHCEModuleMock.NativeHCEModule;
 
 function event(sessionId: string, type: string, extra: Partial<NativeHCEEvent> = {}): NativeHCEEvent {
   return {sessionId, type, apduId: 0, command: '', deviceLocked: false, reason: '', ...extra};
 }
 
 function emit(e: NativeHCEEvent) {
-  mockNative.listener!(e);
+  NativeHCEModuleMock.emitEvent(e);
 }
 
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));
@@ -45,16 +21,12 @@ async function startSession(
   options?: Parameters<typeof import('../js').HCE.beginSession>[1],
 ) {
   const {HCE} = require('../js') as typeof import('../js');
-  mockNative.beginSession.mockImplementation((id: string) => {
-    // the native side emits sessionStarted asynchronously
-    setImmediate(() => emit(event(id, 'sessionStarted')));
-    return Promise.resolve();
-  });
   return HCE.beginSession(handlers, options);
 }
 
 beforeEach(() => {
   jest.clearAllMocks();
+  NativeHCEModuleMock.reset();
   jest.spyOn(console, 'warn').mockImplementation(() => {});
 });
 
@@ -85,6 +57,20 @@ describe('foreground session', () => {
 
     expect(onApdu).toHaveBeenCalledWith({id: 7, command: new Uint8Array([0x00, 0xa4, 0x04, 0x00]), deviceLocked: true});
     expect(mockNative.respondApdu).toHaveBeenCalledWith(session.id, 7, '0A9000');
+    session.invalidate();
+  });
+
+  it('responds to the reader simulated by the Jest mock', async () => {
+    const session = await startSession({onApdu: apdu => [apdu.command.length, 0x90, 0x00]});
+
+    await expect(NativeHCEModuleMock.sendApdu(session.id, '00A40400')).resolves.toBe('049000');
+    session.invalidate();
+  });
+
+  it('rejects when another session already exists', async () => {
+    const session = await startSession({onApdu: () => [0x90, 0x00]});
+
+    await expect(startSession({onApdu: () => [0x90, 0x00]})).rejects.toMatchObject({code: 'err_session_exists'});
     session.invalidate();
   });
 
@@ -431,6 +417,7 @@ describe('background handler', () => {
 describe('background handler declaration', () => {
   const nextTick = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 
+  // the isolated modules share the native module mock (like the native side outlives a reload of the app)
   function loadIsolated(entry: (hce: typeof import('../js').HCE) => void) {
     jest.isolateModules(() => {
       const {AppRegistry, Platform} = require('react-native');
@@ -483,10 +470,6 @@ describe('keep-alive task (Android)', () => {
   });
 
   function beginSession(handlers: Parameters<typeof HCE.beginSession>[0]) {
-    mockNative.beginSession.mockImplementation((id: string) => {
-      setImmediate(() => emit(event(id, 'sessionStarted')));
-      return Promise.resolve();
-    });
     return HCE.beginSession(handlers);
   }
 

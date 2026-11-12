@@ -340,6 +340,46 @@ has been evaluated, so that the background handler registered there is used. If 
 The decision is made when the reader selects the application and it doesn't change until the reader is lost. If the interaction
 was rejected, the reader may re-select the application later (e.g. after you have started the emulation) and it will be routed again.
 
+### Testing with Jest
+
+The package ships a Jest mock of its native module, so that your tests run the library's real JS code against
+a simulated native side. Add its setup file to your Jest config and let Jest transform the package (it's published
+as TypeScript):
+```js
+// jest.config.js
+module.exports = {
+    preset: '@react-native/jest-preset',
+    setupFiles: ['@icedevml/react-native-host-card-emulation/jest/setup'],
+    transformIgnorePatterns: [
+        'node_modules/(?!((jest-)?react-native|@react-native(-community)?|@icedevml/react-native-host-card-emulation)/)',
+    ],
+};
+```
+
+The mock behaves like the native side (a single session at a time, events delivered asynchronously) and simulates
+the reader:
+```typescript
+import HCE from '@icedevml/react-native-host-card-emulation';
+import { NativeHCEModule, emitEvent, reset, sendApdu } from '@icedevml/react-native-host-card-emulation/jest/NativeHCEModuleMock';
+
+beforeEach(() => reset());
+
+test('responds to SELECT', async () => {
+    const session = await HCE.beginSession({ onApdu: () => [0x90, 0x00] });
+
+    // resolves with the R-APDU (hex) sent by the library
+    expect(await sendApdu(session.id, '00A4040007D2760000850101')).toBe('9000');
+
+    emitEvent({ sessionId: session.id, type: 'readerLost' });
+    expect(NativeHCEModule.respondApdu).toHaveBeenCalledTimes(1);
+    session.invalidate();
+});
+```
+
+Every method of `NativeHCEModule` is a `jest.fn()`, e.g. `NativeHCEModule.getCapabilities.mockResolvedValueOnce(...)`,
+and `reset()` restores their default implementations. See the demo app's `__tests__/ndefType4TagApp.test.ts`
+for a complete example.
+
 ### Error codes
 
 Promises returned by the library reject with errors having a `code` property:

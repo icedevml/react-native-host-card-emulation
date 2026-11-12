@@ -29,6 +29,9 @@ jobs:
           cd packages/host-card-emulation
           yarn test
       - run: |
+          cd packages/demo-ndef-app
+          yarn test
+      - run: |
           cd packages/host-card-emulation
           yarn pack
 
