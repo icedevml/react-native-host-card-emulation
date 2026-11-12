@@ -130,7 +130,7 @@ async function runBackgroundTask(data: BackgroundTaskData): Promise<void> {
  *
  * The background handler is disabled by default, the app has to enable it with the
  * `com.itsecrnd.rtnhceandroid.background_handler_enabled` <meta-data> of HCEService in AndroidManifest.xml.
- * Otherwise the readers are rejected natively and the app is never started for them (a warning is logged).
+ * Otherwise the readers are rejected natively and React Native is never started for them (a warning is logged).
  *
  * Call it once, at the top level of the app's entry file (index.js), before AppRegistry.registerComponent().
  * Calling it again replaces the previous factory and its options. No-op on iOS.

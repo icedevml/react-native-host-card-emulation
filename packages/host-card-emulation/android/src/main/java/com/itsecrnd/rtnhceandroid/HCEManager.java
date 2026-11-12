@@ -168,9 +168,10 @@ final class HCEManager {
 
     /**
      * Whether the app has enabled the background handler with the <meta-data> of HCEService. It's disabled
-     * by default, so that a reader never starts the app (and React Native) in background unless the app
-     * handles the interactions there. Not synchronized: reading the manifest is a binder call, so it must not
-     * be done while holding the lock. The manifest can't change while the process is running, it's read once.
+     * by default, so that a reader never starts React Native in background unless the app handles
+     * the interactions there (Android starts the app's process for HCEService anyway). Not synchronized:
+     * reading the manifest is a binder call, so it must not be done while holding the lock. The manifest
+     * can't change while the process is running, it's read once.
      */
     boolean isBackgroundHandlerEnabled(@NonNull Context context) {
         Boolean enabled = backgroundHandlerEnabled;
@@ -330,7 +331,7 @@ final class HCEManager {
         }
 
         if (!backgroundHandlerEnabled) {
-            // the app doesn't handle interactions without a session, don't start it in background for nothing
+            // the app doesn't handle interactions without a session, don't start React Native for nothing
             Log.d(TAG, "startActivation: no session with running emulation and the background handler isn't enabled, rejecting");
             a.target = Target.REJECTED;
             return a;

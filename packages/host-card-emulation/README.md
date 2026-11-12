@@ -305,8 +305,8 @@ is unlocked. Anything beyond that has to be enabled explicitly, in up to three p
 
 | What | Default | How to enable it |
 |---|---|---|
-| Background handler: interactions without a session with running emulation, also while the app isn't running | Disabled: the readers are rejected natively and the app is never started for them | `com.itsecrnd.rtnhceandroid.background_handler_enabled` meta-data of `HCEService` in `AndroidManifest.xml` |
-| Android passes the C-APDUs of a locked device to your app | No (`android:requireDeviceUnlock="true"`): Android asks the user to unlock the device first | `android:requireDeviceUnlock="false"` in `aid_list.xml` |
+| Background handler: interactions without a session with running emulation, also while the app isn't running | Disabled: the readers are rejected natively, React Native is never started for them | `com.itsecrnd.rtnhceandroid.background_handler_enabled` meta-data of `HCEService` in `AndroidManifest.xml` |
+| Android passes the C-APDUs of a locked device to your app | No (`android:requireDeviceUnlock="true"`): Android asks the user to unlock the device and tap again ("Tap your phone on the NFC reader again to use ...", with the `android:description` of `aid_list.xml`) | `android:requireDeviceUnlock="false"` in `aid_list.xml` |
 | The library delivers the C-APDUs of a locked device to your handlers | No (`allowWhenLocked: false`): the reader receives an error status word | `allowWhenLocked: true` in the options of `HCE.beginSession()` / `HCE.registerBackgroundHandler()` |
 
 To handle the readers without a session (e.g. while the app is in background or not running at all):
@@ -393,7 +393,8 @@ Routing rules on Android:
    so that the session wins over other apps that have registered the same AIDs. In background, such conflicts are resolved by Android.
 2. Otherwise, if the background handler is enabled in `AndroidManifest.xml`, the background handler handles the interaction.
 3. Otherwise, the reader receives an error status word. Without the opt-in in `AndroidManifest.xml`, this is decided
-   natively and the app is never started for the reader.
+   natively and React Native is never started for the reader. Android still starts the app's process to run `HCEService`
+   (it's the app's own service), but nothing beyond the native code of the library.
 
 Call `HCE.unregisterBackgroundHandler()` to temporarily stop handling interactions in background (e.g. on a screen
 where the HCE should only work after the user explicitly started it) and `HCE.registerBackgroundHandler()` to resume.
