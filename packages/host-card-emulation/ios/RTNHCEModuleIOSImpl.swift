@@ -87,6 +87,11 @@ enum HexCoding {
   // the number of the starts that haven't finished yet, including the invalidated ones
   private var unfinishedStarts: Int = 0
   private var pendingAPDU: PendingAPDU? = nil
+  /*
+   The current session has reported readerDetected that hasn't been followed by readerLost yet. iOS doesn't report
+   readerDeselected after stopEmulation(), so stopEmulation() reports readerLost itself, like Android does.
+   */
+  private var readerPresent: Bool = false
   private var lastAPDUId: Int64 = 0
   // the number of event loops that are still running, including the ones of invalidated sessions
   private var runningEventLoops: Int = 0
@@ -343,6 +348,7 @@ enum HexCoding {
         self.currentSessionId = sessionId
         self.currentSession = session
         self.pendingAPDU = nil
+        self.readerPresent = false
         return false
       }
 
@@ -370,15 +376,30 @@ enum HexCoding {
           emit(sessionId, "sessionStarted")
 
         case .readerDetected:
+          synchronized {
+            if self.currentSessionId == sessionId {
+              self.readerPresent = true
+            }
+          }
           emit(sessionId, "readerDetected")
 
         case .readerDeselected:
-          synchronized {
-            if self.currentSessionId == sessionId {
-              self.pendingAPDU = nil
+          let wasPresent = synchronized { () -> Bool in
+            guard self.currentSessionId == sessionId else {
+              // JS ignores the events of the sessions that are already closed
+              return true
             }
+
+            let wasPresent = self.readerPresent
+            self.readerPresent = false
+            self.pendingAPDU = nil
+            return wasPresent
           }
-          emit(sessionId, "readerLost")
+
+          // stopEmulation() might have reported it already
+          if wasPresent {
+            emit(sessionId, "readerLost")
+          }
 
         case .received(let cardAPDU):
           let apduId = synchronized { () -> Int64? in
@@ -423,6 +444,7 @@ enum HexCoding {
       self.currentSessionId = nil
       self.currentSession = nil
       self.pendingAPDU = nil
+      self.readerPresent = false
       return true
     }
 
@@ -452,6 +474,7 @@ enum HexCoding {
       self.currentSessionId = nil
       self.currentSession = nil
       self.pendingAPDU = nil
+      self.readerPresent = false
       return current
     }
 
@@ -470,6 +493,7 @@ enum HexCoding {
       self.currentSessionId = nil
       self.currentSession = nil
       self.pendingAPDU = nil
+      self.readerPresent = false
       self.emitOnEvent = nil
       return current
     }
@@ -513,14 +537,15 @@ enum HexCoding {
     let success = String(status) == "success"
 
     enqueueOperation {
-      let session = self.synchronized { () -> CardSession? in
-        let session = self.sessionIfCurrent(sessionId)
-
-        if session != nil {
-          self.pendingAPDU = nil
+      let (session, wasPresent) = self.synchronized { () -> (CardSession?, Bool) in
+        guard let session = self.sessionIfCurrent(sessionId) else {
+          return (nil, false)
         }
 
-        return session
+        let wasPresent = self.readerPresent
+        self.readerPresent = false
+        self.pendingAPDU = nil
+        return (session, wasPresent)
       }
 
       guard let session = session else {
@@ -529,6 +554,12 @@ enum HexCoding {
       }
 
       await session.stopEmulation(status: success ? .success : .failure)
+
+      // the link with the reader has ended, but iOS doesn't report readerDeselected after stopEmulation()
+      if wasPresent {
+        self.emit(sessionId, "readerLost")
+      }
+
       resolve(nil)
     }
   }

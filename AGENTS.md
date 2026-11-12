@@ -128,7 +128,7 @@ tables, search for every occurrence when changing one.
   `jest/NativeHCEModuleMock.js` (installed by `jest/setup.js`): inject native events with `emitEvent()`,
   simulate the reader with `sendApdu()`. Mocks registered with `jest.mock()` are shared by `jest.isolateModules()`.
 - The user documentation is `packages/host-card-emulation/README.md` (published to npm). Keep its API
-  sections, the error code and status word tables and "Migrating from 0.x" in sync with the code.
+  sections, the error code and status word tables and "Migrating to 2.x" in sync with the code.
   The root `README.md` only links the packages.
 
 ## CI and releases
