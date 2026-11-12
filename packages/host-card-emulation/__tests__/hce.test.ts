@@ -1,3 +1,4 @@
+import type {BackgroundHandlerFactory, BackgroundHandlers, ResponseAPDU} from '../js';
 import type {NativeHCEEvent} from '../js/NativeHCEModule';
 // the native module is replaced with this mock by jest/setup.js (see jest.config.js)
 import * as NativeHCEModuleMock from '../jest/NativeHCEModuleMock';
@@ -45,12 +46,40 @@ describe('hex helpers', () => {
   });
 });
 
+describe('capabilities', () => {
+  it('returns the capabilities reported by the native side', async () => {
+    const {HCE} = require('../js') as typeof import('../js');
+    const caps = {
+      platform: 'android',
+      hceSupported: true,
+      nfcEnabled: false,
+      eligible: true,
+      backgroundSupported: false,
+      presentmentSupported: false,
+    };
+    mockNative.getCapabilities.mockResolvedValueOnce(caps);
+
+    await expect(HCE.getCapabilities()).resolves.toEqual(caps);
+  });
+
+  it('converts the native errors to HCEError', async () => {
+    const {HCE, HCEError} = require('../js') as typeof import('../js');
+    mockNative.getCapabilities.mockRejectedValueOnce(Object.assign(new Error('failed'), {code: 'err_platform_unsupported'}));
+
+    const promise = HCE.getCapabilities();
+
+    await expect(promise).rejects.toBeInstanceOf(HCEError);
+    await expect(promise).rejects.toMatchObject({code: 'err_platform_unsupported'});
+  });
+});
+
 describe('foreground session', () => {
   it('resolves after sessionStarted and responds with the returned R-APDU', async () => {
     const onApdu = jest.fn(() => new Uint8Array([0x0a, 0x90, 0x00]));
     const session = await startSession({onApdu});
 
-    expect(mockNative.beginSession).toHaveBeenCalledWith(session.id, true);
+    // allowWhenLocked is false by default
+    expect(mockNative.beginSession).toHaveBeenCalledWith(session.id, false);
 
     emit(event(session.id, 'apdu', {apduId: 7, command: '00A40400', deviceLocked: true}));
     await flush();
@@ -77,6 +106,24 @@ describe('foreground session', () => {
     session.invalidate();
   });
 
+  it('routes the events by session ID', async () => {
+    const firstOnApdu = jest.fn(() => [0x90, 0x00]);
+    const secondOnApdu = jest.fn(() => [0x90, 0x00]);
+    const first = await startSession({onApdu: firstOnApdu});
+    first.invalidate();
+    const second = await startSession({onApdu: secondOnApdu});
+
+    emit(event(first.id, 'apdu', {apduId: 1, command: '00'}));
+    emit(event(second.id, 'apdu', {apduId: 2, command: '00'}));
+    await flush();
+
+    expect(firstOnApdu).not.toHaveBeenCalled();
+    expect(secondOnApdu).toHaveBeenCalledTimes(1);
+    expect(mockNative.respondApdu).toHaveBeenCalledWith(first.id, 1, '6F00');
+    expect(mockNative.respondApdu).toHaveBeenCalledWith(second.id, 2, '9000');
+    second.invalidate();
+  });
+
   it('responds with 6F00 when the handler throws or returns an invalid response', async () => {
     const onError = jest.fn();
     const onApdu = jest
@@ -94,6 +141,42 @@ describe('foreground session', () => {
     expect(mockNative.respondApdu).toHaveBeenNthCalledWith(1, session.id, 1, '6F00');
     expect(mockNative.respondApdu).toHaveBeenNthCalledWith(2, session.id, 2, '6F00');
     expect(onError).toHaveBeenCalledTimes(2);
+    session.invalidate();
+  });
+
+  it('responds with 6F00 to the responses that are not bytes', async () => {
+    const onError = jest.fn();
+    // a string has a length too, a byte out of range, an array-like object without the bytes
+    const responses: unknown[] = ['9000', null, [0x90, 0x100], {length: 2}];
+    const session = await startSession({onApdu: apdu => responses[apdu.id - 1] as ResponseAPDU, onError});
+
+    responses.forEach((_response, i) => emit(event(session.id, 'apdu', {apduId: i + 1, command: '00'})));
+    await flush();
+
+    responses.forEach((_response, i) => {
+      expect(mockNative.respondApdu).toHaveBeenNthCalledWith(i + 1, session.id, i + 1, '6F00');
+    });
+    expect(onError).toHaveBeenCalledTimes(responses.length);
+    expect(onError.mock.calls.every(([error]) => (error as {code?: unknown}).code === 'err_invalid_rapdu')).toBe(true);
+    session.invalidate();
+  });
+
+  it('logs the error if onError() throws', async () => {
+    const session = await startSession({
+      onApdu: () => {
+        throw new Error('handler failed');
+      },
+      onError: () => {
+        throw new Error('onError failed');
+      },
+    });
+
+    emit(event(session.id, 'apdu', {apduId: 1, command: '00'}));
+    await flush();
+
+    expect(console.warn).toHaveBeenCalledWith('[HCE] onError handler threw', expect.objectContaining({message: 'onError failed'}));
+    expect(console.warn).toHaveBeenCalledWith('[HCE] handler error', expect.objectContaining({message: 'handler failed'}));
+    expect(mockNative.respondApdu).toHaveBeenCalledWith(session.id, 1, '6F00');
     session.invalidate();
   });
 
@@ -154,6 +237,44 @@ describe('foreground session', () => {
     expect(mockNative.respondApdu).toHaveBeenCalledWith(session.id, 3, '6F00');
   });
 
+  it('drops the events that are still queued when the session is closed', async () => {
+    const calls: string[] = [];
+    let releaseFirst!: () => void;
+    const session = await startSession({
+      onApdu: async apdu => {
+        calls.push(`apdu-${apdu.id}`);
+
+        if (apdu.id === 1) {
+          await new Promise<void>(resolve => {
+            releaseFirst = resolve;
+          });
+        }
+
+        return [0x90, 0x00];
+      },
+      onReaderLost: () => {
+        calls.push('readerLost');
+      },
+      onInvalidated: reason => {
+        calls.push(`invalidated-${reason}`);
+      },
+    });
+
+    emit(event(session.id, 'apdu', {apduId: 1, command: '00'}));
+    emit(event(session.id, 'apdu', {apduId: 2, command: '00'}));
+    emit(event(session.id, 'readerLost'));
+    await flush();
+
+    session.invalidate();
+    releaseFirst();
+    await flush();
+
+    // the call that was running has finished, the queued ones were never made
+    expect(calls).toEqual(['apdu-1', 'invalidated-userInvalidated']);
+    expect(mockNative.respondApdu).toHaveBeenCalledWith(session.id, 1, '9000');
+    expect(mockNative.respondApdu).toHaveBeenCalledWith(session.id, 2, '6F00');
+  });
+
   it('closes when the OS invalidates the session', async () => {
     const onInvalidated = jest.fn();
     const session = await startSession({onApdu: () => [0x90, 0x00], onInvalidated});
@@ -163,6 +284,62 @@ describe('foreground session', () => {
 
     await expect(session.closed).resolves.toBe('maxSessionDurationReached');
     expect(onInvalidated).toHaveBeenCalledWith('maxSessionDurationReached', session);
+  });
+
+  it('rejects with err_session_invalidated when the OS closes the session before it has started', async () => {
+    const {HCE, HCEError} = require('../js') as typeof import('../js');
+    const onInvalidated = jest.fn();
+    // the native side has created the session, but the OS closes it instead of starting it
+    mockNative.beginSession.mockImplementation(async sessionId => {
+      Promise.resolve().then(() => emit(event(sessionId, 'sessionInvalidated', {reason: 'systemNotAvailable'})));
+    });
+
+    const promise = HCE.beginSession({onApdu: () => [0x90, 0x00], onInvalidated});
+
+    await expect(promise).rejects.toBeInstanceOf(HCEError);
+    await expect(promise).rejects.toMatchObject({code: 'err_session_invalidated'});
+    // the app has never got the session, so it isn't notified
+    expect(onInvalidated).not.toHaveBeenCalled();
+  });
+
+  it('rejects right away if the signal is already aborted', async () => {
+    const {HCE} = require('../js') as typeof import('../js');
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(HCE.beginSession({onApdu: () => [0x90, 0x00]}, {signal: controller.signal})).rejects.toMatchObject({
+      code: 'err_aborted',
+    });
+    expect(mockNative.beginSession).not.toHaveBeenCalled();
+  });
+
+  it('invalidates the started session when the signal is aborted', async () => {
+    const controller = new AbortController();
+    const onInvalidated = jest.fn();
+    const session = await startSession({onApdu: () => [0x90, 0x00], onInvalidated}, {signal: controller.signal});
+
+    controller.abort();
+
+    await expect(session.closed).resolves.toBe('userInvalidated');
+    await flush();
+    expect(mockNative.invalidateSession).toHaveBeenCalledWith(session.id);
+    expect(onInvalidated).toHaveBeenCalledWith('userInvalidated', session);
+  });
+
+  it('does not call the native side for a closed session', async () => {
+    const session = await startSession({onApdu: () => [0x90, 0x00]});
+
+    await session.stopEmulation();
+    expect(mockNative.stopEmulation).toHaveBeenCalledWith(session.id, 'success');
+
+    session.invalidate();
+
+    await expect(session.stopEmulation('failure')).rejects.toMatchObject({code: 'err_no_session'});
+    await expect(session.isEmulationRunning()).resolves.toBe(false);
+    session.setAlertMessage('ignored');
+    expect(mockNative.stopEmulation).toHaveBeenCalledTimes(1);
+    expect(mockNative.isEmulationRunning).not.toHaveBeenCalled();
+    expect(mockNative.setSessionAlertMessage).not.toHaveBeenCalled();
   });
 
   it('invalidates the session when aborted while starting', async () => {
@@ -278,6 +455,8 @@ describe('foreground session', () => {
     );
 
     emit(event(session.id, 'readerDetected'));
+    // onReaderDetected() is running when the session is closed
+    await flush();
     session.invalidate();
     await sleep(50);
 
@@ -309,6 +488,7 @@ describe('foreground session', () => {
     emit(event(session.id, 'readerDetected'));
     emit(event(session.id, 'apdu', {apduId: 1, command: '00'}));
     emit(event(session.id, 'readerLost'));
+    await flush();
     session.invalidate();
     await flush();
 
@@ -318,15 +498,17 @@ describe('foreground session', () => {
   });
 
   it('passes allowWhenLocked to the native side', async () => {
-    const session = await startSession({onApdu: () => [0x90, 0x00]}, {allowWhenLocked: false});
+    const session = await startSession({onApdu: () => [0x90, 0x00]}, {allowWhenLocked: true});
 
-    expect(mockNative.beginSession).toHaveBeenCalledWith(session.id, false);
+    expect(mockNative.beginSession).toHaveBeenCalledWith(session.id, true);
     session.invalidate();
   });
 
   it('rejects invalid options', async () => {
     const {HCE} = require('../js') as typeof import('../js');
     const handlers = {onApdu: () => [0x90, 0x00]};
+
+    await expect(HCE.beginSession({} as unknown as typeof handlers)).rejects.toMatchObject({code: 'err_invalid_argument'});
 
     for (const handlerTimeout of [-1, NaN, 0x80000000, '10' as unknown as number]) {
       await expect(HCE.beginSession(handlers, {handlerTimeout})).rejects.toMatchObject({code: 'err_invalid_argument'});
@@ -378,7 +560,8 @@ describe('background handler', () => {
     const factory = jest.fn(() => ({onApdu: () => [0x90, 0x00], onReaderLost}));
 
     HCE.registerBackgroundHandler(factory);
-    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenCalledWith(true, true);
+    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenCalledWith(true, false);
+    expect(console.warn).not.toHaveBeenCalled();
 
     let finished = false;
     const taskPromise = task({sessionId: 'bg-1', appState: 'foreground'}).then(() => {
@@ -421,16 +604,95 @@ describe('background handler', () => {
     expect(mockNative.backgroundSessionReady).not.toHaveBeenCalled();
   });
 
+  it('finishes if the factory returns no onApdu(), without signalling readiness', async () => {
+    const {HCE} = require('../js') as typeof import('../js');
+    HCE.registerBackgroundHandler(() => ({}) as BackgroundHandlers);
+
+    await task({sessionId: 'bg-6', appState: 'background'});
+
+    expect(console.warn).toHaveBeenCalledWith('[HCE] handler error', expect.objectContaining({code: 'err_invalid_argument'}));
+    expect(mockNative.backgroundSessionReady).not.toHaveBeenCalled();
+  });
+
+  it('finishes right away if the background handler was unregistered in the meantime', async () => {
+    const {HCE} = require('../js') as typeof import('../js');
+    const factory = jest.fn(() => ({onApdu: () => [0x90, 0x00]}));
+    HCE.registerBackgroundHandler(factory);
+    HCE.unregisterBackgroundHandler();
+
+    // finishing the task makes the native side reject the interaction
+    await task({sessionId: 'bg-7', appState: 'background'});
+
+    expect(factory).not.toHaveBeenCalled();
+    expect(mockNative.backgroundSessionReady).not.toHaveBeenCalled();
+  });
+
+  it('responds with 6F00 and calls onError() when the background onApdu() throws', async () => {
+    const {HCE} = require('../js') as typeof import('../js');
+    const onError = jest.fn();
+    HCE.registerBackgroundHandler(() => ({
+      onApdu: () => {
+        throw new Error('handler failed');
+      },
+      onError,
+    }));
+
+    const taskPromise = task({sessionId: 'bg-8', appState: 'background'});
+    await flush();
+    emit(event('bg-8', 'apdu', {apduId: 9, command: '00'}));
+    await flush();
+
+    expect(mockNative.respondApdu).toHaveBeenCalledWith('bg-8', 9, '6F00');
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({message: 'handler failed'}));
+
+    emit(event('bg-8', 'readerLost'));
+    await taskPromise;
+  });
+
+  it('rejects a factory that is not a function and is a no-op on iOS', () => {
+    const {HCE} = require('../js') as typeof import('../js');
+    const {Platform} = require('react-native');
+    let error: unknown;
+
+    try {
+      HCE.registerBackgroundHandler('factory' as unknown as BackgroundHandlerFactory);
+    } catch (e) {
+      error = e;
+    }
+
+    expect(error).toMatchObject({code: 'err_invalid_argument'});
+
+    Platform.OS = 'ios';
+
+    try {
+      HCE.registerBackgroundHandler(() => ({onApdu: () => [0x90, 0x00]}));
+      HCE.unregisterBackgroundHandler();
+    } finally {
+      Platform.OS = 'android';
+    }
+
+    expect(mockNative.setBackgroundHandlerRegistered).not.toHaveBeenCalled();
+  });
+
   it('can be unregistered and registered again', () => {
     const {HCE} = require('../js') as typeof import('../js');
     const factory = () => ({onApdu: () => [0x90, 0x00]});
 
     HCE.registerBackgroundHandler(factory);
     HCE.unregisterBackgroundHandler();
-    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenLastCalledWith(false, true);
+    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenLastCalledWith(false, false);
 
-    HCE.registerBackgroundHandler(factory, {allowWhenLocked: false});
-    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenLastCalledWith(true, false);
+    HCE.registerBackgroundHandler(factory, {allowWhenLocked: true});
+    expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenLastCalledWith(true, true);
+  });
+
+  it('warns if the background handler is not enabled in AndroidManifest.xml', () => {
+    const {HCE} = require('../js') as typeof import('../js');
+    mockNative.isBackgroundHandlerEnabled.mockReturnValueOnce(false);
+
+    HCE.registerBackgroundHandler(() => ({onApdu: () => [0x90, 0x00]}));
+
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('background_handler_enabled'));
   });
 
   it('finishes if the factory times out, without signalling readiness', async () => {
@@ -499,7 +761,7 @@ describe('background handler declaration', () => {
       await Promise.resolve();
 
       expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenCalledTimes(1);
-      expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenCalledWith(false, true);
+      expect(mockNative.setBackgroundHandlerRegistered).toHaveBeenCalledWith(false, false);
     } finally {
       jest.useRealTimers();
     }
@@ -509,7 +771,7 @@ describe('background handler declaration', () => {
     loadIsolated(HCE => HCE.registerBackgroundHandler(() => ({onApdu: () => [0x90, 0x00]})));
     await nextTick();
 
-    expect(mockNative.setBackgroundHandlerRegistered.mock.calls).toEqual([[true, true]]);
+    expect(mockNative.setBackgroundHandlerRegistered.mock.calls).toEqual([[true, false]]);
   });
 });
 

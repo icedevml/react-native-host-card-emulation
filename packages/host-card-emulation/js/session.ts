@@ -7,6 +7,7 @@ import {
   callNative,
   HCEError,
   processApdu,
+  rejectApdu,
   reportError,
   resolveHandlerOptions,
   SerialQueue,
@@ -97,13 +98,18 @@ class Session implements HCESession {
     return this.active;
   }
 
-  private runHandler(name: string, handler: ((session: HCESession) => unknown) | undefined) {
+  /*
+   The events that are still waiting in the queue when the session is closed are dropped: their handlers are
+   never called (a C-APDU is answered with 6F00), as the handlers might have side effects that the reader
+   would never learn about. Only onInvalidated() is called after the session has been closed.
+   */
+  private runHandler(name: string, handler: ((session: HCESession) => unknown) | undefined, afterClose = false) {
     if (!handler) {
       return;
     }
 
     this.queue
-      .push(() => callHandler(name, () => handler(this), this.handlerTimeout))
+      .push(() => (this.active || afterClose ? callHandler(name, () => handler(this), this.handlerTimeout) : undefined))
       .catch(e => reportError(this.onError, e));
   }
 
@@ -127,7 +133,9 @@ class Session implements HCESession {
       case 'apdu': {
         const {onApdu} = this.handlers;
         this.queue.push(() =>
-          processApdu(this.id, event, apdu => onApdu(apdu, this), this.onError, this.handlerTimeout),
+          this.active
+            ? processApdu(this.id, event, apdu => onApdu(apdu, this), this.onError, this.handlerTimeout)
+            : rejectApdu(this.id, event.apduId),
         );
         break;
       }
@@ -151,7 +159,7 @@ class Session implements HCESession {
       this.rejectStarted(new HCEError('err_session_invalidated', `The session was invalidated: ${reason}`));
     } else {
       const onInvalidated = this.handlers.onInvalidated;
-      this.runHandler('onInvalidated()', onInvalidated ? session => onInvalidated(reason, session) : undefined);
+      this.runHandler('onInvalidated()', onInvalidated ? session => onInvalidated(reason, session) : undefined, true);
     }
 
     activeSessions.delete(this.id);

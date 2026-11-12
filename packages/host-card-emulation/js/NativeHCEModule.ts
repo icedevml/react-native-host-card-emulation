@@ -63,6 +63,8 @@ export interface Spec extends TurboModule {
 
   setBackgroundHandlerRegistered(registered: boolean, allowWhenLocked: boolean): void;
   backgroundSessionReady(sessionId: string): boolean;
+  // Android: whether the background handler is enabled in AndroidManifest.xml, false on iOS
+  isBackgroundHandlerEnabled(): boolean;
 
   readonly onEvent: CodegenTypes.EventEmitter<NativeHCEEvent>;
 }

@@ -16,7 +16,7 @@ import android.util.Log;
  * Thin adapter between the Android NFC stack and HCEManager, which holds all the state.
  * None of the callbacks is allowed to throw, as that would crash the whole app process.
  */
-public class HCEService extends HostApduService {
+public class HCEService extends HostApduService implements HCEManager.ApduService {
     private static final String TAG = "HCEService";
 
     private boolean isDeviceLocked() {
@@ -31,9 +31,11 @@ public class HCEService extends HostApduService {
     @Override
     public byte[] processCommandApdu(byte[] command, Bundle extras) {
         try {
-            // binder call, so it's done before entering HCEManager's critical section
+            HCEManager manager = HCEManager.getInstance();
+            // binder calls, so they're done before entering HCEManager's critical section
             boolean deviceLocked = isDeviceLocked();
-            return HCEManager.getInstance().onCommand(this, command, deviceLocked);
+            boolean backgroundHandlerEnabled = manager.isBackgroundHandlerEnabled(this);
+            return manager.onCommand(this, command, deviceLocked, backgroundHandlerEnabled);
         } catch (RuntimeException e) {
             Log.e(TAG, "processCommandApdu failed", e);
             return HCEManager.SW_NO_PRECISE_DIAGNOSIS.clone();

@@ -3,7 +3,9 @@ name: Node.js Package
 on:
   push:
     branches:
-      - '*'
+      - '**'
+  # the pull requests from forks don't trigger the push event of this repository
+  pull_request:
   release:
     types: [created]
 
@@ -12,6 +14,8 @@ permissions:
 
 jobs:
   build:
+    # the pull requests from this repository's branches are already built on push
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -38,9 +42,36 @@ jobs:
           cd packages/host-card-emulation
           npm pack --dry-run --ignore-scripts
 
+  android:
+    # the pull requests from this repository's branches are already built on push
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      # Node.js 25+ doesn't bundle corepack, install it after setting up Node.js
+      - run: npm install -g corepack@0.36.0
+      - run: corepack enable
+      # the React Native Gradle plugin runs the autolinking and the codegen from node_modules
+      - run: yarn install --immutable
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: 21
+      # also validates the checksum of the committed Gradle wrapper jar
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+      # the JVM tests of the native Android code, the library module is built within the demo app's project
+      - run: |
+          cd packages/demo-ndef-app/android
+          ./gradlew :icedevml_react-native-host-card-emulation:testDebugUnitTest
+
   publish-npm:
     if: github.event.release
-    needs: build
+    needs: [build, android]
     runs-on: ubuntu-26.04
     environment: production
     permissions:

@@ -153,6 +153,11 @@ static NSString *const kUnsupportedMessage = @"This iOS version does not support
     return @NO;
 }
 
+- (nonnull NSNumber *)isBackgroundHandlerEnabled {
+    // background HCE is not supported on iOS
+    return @NO;
+}
+
 + (NSString *)moduleName {
     return @"NativeHCEModule";
 }

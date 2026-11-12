@@ -1,7 +1,10 @@
 package com.itsecrnd.rtnhceandroid;
 
 import android.app.Application;
-import android.nfc.cardemulation.HostApduService;
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.pm.PackageManager;
+import android.content.pm.ServiceInfo;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -9,6 +12,7 @@ import android.util.Log;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.annotation.VisibleForTesting;
 
 import com.facebook.react.ReactApplication;
 import com.facebook.react.ReactHost;
@@ -38,6 +42,8 @@ final class HCEManager {
     static final String BACKGROUND_TASK_KEY = "handleBackgroundHCECall";
     // must match KEEP_ALIVE_TASK_KEY in js/session.ts
     static final String KEEP_ALIVE_TASK_KEY = "keepAliveHCESession";
+    // <meta-data> of HCEService in the app's AndroidManifest.xml, see isBackgroundHandlerEnabled()
+    static final String BACKGROUND_HANDLER_META_DATA = "com.itsecrnd.rtnhceandroid.background_handler_enabled";
 
     // ISO 7816-4: file or application not found (response to SELECT that can't be served)
     private static final byte[] SW_APPLICATION_NOT_FOUND = {(byte) 0x6A, (byte) 0x82};
@@ -52,10 +58,38 @@ final class HCEManager {
      */
     private static final long ROUTING_TIMEOUT_MS = 15_000;
 
-    private static final HCEManager INSTANCE = new HCEManager();
+    private static final HCEManager INSTANCE = new HCEManager(HCEManager::startHeadlessJsTask);
 
     static HCEManager getInstance() {
         return INSTANCE;
+    }
+
+    /**
+     * The part of HCEService that HCEManager uses (implemented by HostApduService's own final methods),
+     * replaced in the tests.
+     */
+    interface ApduService {
+        void sendResponseApdu(byte[] response);
+
+        Application getApplication();
+    }
+
+    /**
+     * Starts the headless JS tasks, replaced in the tests. Returns the task ID, throws if the task can't be started.
+     */
+    interface HeadlessTasks {
+        // must be called on the main thread
+        int start(@NonNull ReactContext context, @NonNull String taskKey, @NonNull Bundle data);
+    }
+
+    private static int startHeadlessJsTask(@NonNull ReactContext context, @NonNull String taskKey, @NonNull Bundle data) {
+        return HeadlessJsTaskContext.getInstance(context).startTask(new HeadlessJsTaskConfig(
+                taskKey,
+                Arguments.fromBundle(data),
+                // no timeout, the JS side finishes the task once the handlers of the interaction have finished
+                0,
+                // also used when the app is in foreground
+                true));
     }
 
     private static final class ForegroundSession {
@@ -83,7 +117,7 @@ final class HCEManager {
     }
 
     private static final class Activation {
-        final HostApduService service;
+        final ApduService service;
         Target target;
         String sessionId;
         RTNHCEAndroidModule module;
@@ -111,18 +145,55 @@ final class HCEManager {
         byte[] pendingCommand;
         boolean pendingDeviceLocked;
 
-        Activation(HostApduService service, boolean deviceLocked) {
+        Activation(ApduService service, boolean deviceLocked) {
             this.service = service;
             this.deviceLocked = deviceLocked;
         }
     }
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final HeadlessTasks headlessTasks;
     private ForegroundSession foregroundSession;
     private Activation activation;
     private long lastApduId;
+    // null until the manifest has been read
+    @Nullable
+    private volatile Boolean backgroundHandlerEnabled;
 
-    private HCEManager() {
+    // the tests create their own instances
+    @VisibleForTesting
+    HCEManager(@NonNull HeadlessTasks headlessTasks) {
+        this.headlessTasks = headlessTasks;
+    }
+
+    /**
+     * Whether the app has enabled the background handler with the <meta-data> of HCEService. It's disabled
+     * by default, so that a reader never starts the app (and React Native) in background unless the app
+     * handles the interactions there. Not synchronized: reading the manifest is a binder call, so it must not
+     * be done while holding the lock. The manifest can't change while the process is running, it's read once.
+     */
+    boolean isBackgroundHandlerEnabled(@NonNull Context context) {
+        Boolean enabled = backgroundHandlerEnabled;
+
+        if (enabled == null) {
+            enabled = readBackgroundHandlerEnabled(context);
+            backgroundHandlerEnabled = enabled;
+        }
+
+        return enabled;
+    }
+
+    // the flags overload replacing getServiceInfo(ComponentName, int) needs API 33
+    @SuppressWarnings("deprecation")
+    private static boolean readBackgroundHandlerEnabled(@NonNull Context context) {
+        try {
+            ServiceInfo service = context.getPackageManager().getServiceInfo(
+                    new ComponentName(context, HCEService.class), PackageManager.GET_META_DATA);
+            return service.metaData != null && service.metaData.getBoolean(BACKGROUND_HANDLER_META_DATA, false);
+        } catch (PackageManager.NameNotFoundException | RuntimeException e) {
+            Log.w(TAG, "readBackgroundHandlerEnabled: unable to read the meta-data of HCEService", e);
+            return false;
+        }
     }
 
     private static boolean isSelectByName(byte[] command) {
@@ -166,7 +237,8 @@ final class HCEManager {
     /**
      * @return the response to send synchronously or null if the response will be sent asynchronously
      */
-    synchronized byte[] onCommand(@NonNull HostApduService service, @NonNull byte[] command, boolean deviceLocked) {
+    synchronized byte[] onCommand(@NonNull ApduService service, @NonNull byte[] command, boolean deviceLocked,
+                                  boolean backgroundHandlerEnabled) {
         if (activation != null && activation.service != service) {
             Log.w(TAG, "onCommand: C-APDU from a different service instance, ending the previous activation");
             endActivation(activation);
@@ -179,7 +251,7 @@ final class HCEManager {
         }
 
         if (activation == null) {
-            activation = startActivation(service, deviceLocked);
+            activation = startActivation(service, deviceLocked, backgroundHandlerEnabled);
         }
 
         Activation a = activation;
@@ -212,7 +284,7 @@ final class HCEManager {
         return null;
     }
 
-    synchronized void onDeactivated(@NonNull HostApduService service, int reason) {
+    synchronized void onDeactivated(@NonNull ApduService service, int reason) {
         Log.d(TAG, "onDeactivated: " + reason);
 
         if (activation != null && activation.service == service) {
@@ -221,7 +293,7 @@ final class HCEManager {
         }
     }
 
-    synchronized void onServiceDestroyed(@NonNull HostApduService service) {
+    synchronized void onServiceDestroyed(@NonNull ApduService service) {
         if (activation != null && activation.service == service) {
             endActivation(activation);
             activation = null;
@@ -232,7 +304,8 @@ final class HCEManager {
      * Activation handling
      * ------------------------------------------------------------------------------------------- */
 
-    private Activation startActivation(@NonNull HostApduService service, boolean deviceLocked) {
+    private Activation startActivation(@NonNull ApduService service, boolean deviceLocked,
+                                       boolean backgroundHandlerEnabled) {
         Activation a = new Activation(service, deviceLocked);
         ForegroundSession fg = foregroundSession;
 
@@ -253,6 +326,13 @@ final class HCEManager {
             fg.module.emitEvent(fg.id, "readerDetected");
             fg.interactions++;
             startKeepAliveTask(fg.module, fg.id, fg.interactions);
+            return a;
+        }
+
+        if (!backgroundHandlerEnabled) {
+            // the app doesn't handle interactions without a session, don't start it in background for nothing
+            Log.d(TAG, "startActivation: no session with running emulation and the background handler isn't enabled, rejecting");
+            a.target = Target.REJECTED;
             return a;
         }
 
@@ -389,15 +469,8 @@ final class HCEManager {
         data.putString("appState", foreground ? "foreground" : "background");
 
         try {
-            a.taskId = HeadlessJsTaskContext.getInstance(taskContext).startTask(
-                    new HeadlessJsTaskConfig(
-                            BACKGROUND_TASK_KEY,
-                            Arguments.fromBundle(data),
-                            // no timeout, the JS side finishes the task when the reader is lost
-                            0,
-                            // also used when the app is in foreground, but has no active session
-                            true
-                    ));
+            // the JS side finishes the task when the reader is lost
+            a.taskId = headlessTasks.start(taskContext, BACKGROUND_TASK_KEY, data);
         } catch (RuntimeException | AssertionError e) {
             Log.e(TAG, "startBackgroundTask: failed to start the headless task", e);
             rejectActivation(a);
@@ -423,8 +496,7 @@ final class HCEManager {
         data.putInt("interaction", interaction);
 
         try {
-            HeadlessJsTaskContext.getInstance(context).startTask(
-                    new HeadlessJsTaskConfig(KEEP_ALIVE_TASK_KEY, Arguments.fromBundle(data), 0, true));
+            headlessTasks.start(context, KEEP_ALIVE_TASK_KEY, data);
         } catch (RuntimeException | AssertionError e) {
             // not fatal, the timers only stop while the app isn't resumed
             Log.w(TAG, "startKeepAliveTask: failed to start the headless task", e);

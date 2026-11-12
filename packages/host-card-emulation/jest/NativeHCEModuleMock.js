@@ -112,6 +112,8 @@ const defaultImplementations = {
   isExclusiveNFC: () => exclusiveNFC,
   setBackgroundHandlerRegistered: () => {},
   backgroundSessionReady: () => true,
+  // like an app that has enabled the background handler in AndroidManifest.xml
+  isBackgroundHandlerEnabled: () => Platform.OS !== 'ios',
   onEvent: listener => {
     listeners.add(listener);
     return {remove: () => listeners.delete(listener)};

@@ -101,7 +101,7 @@ export interface ResolvedHandlerOptions {
 }
 
 export function resolveHandlerOptions(options: HandlerOptions): ResolvedHandlerOptions {
-  const {handlerTimeout = DEFAULT_HANDLER_TIMEOUT, allowWhenLocked = true} = options;
+  const {handlerTimeout = DEFAULT_HANDLER_TIMEOUT, allowWhenLocked = false} = options;
 
   if (
     typeof handlerTimeout !== 'number' ||
@@ -210,6 +210,13 @@ export async function processApdu(
   }
 }
 
+/**
+ * Respond to the C-APDU that no handler is going to process, so that the reader isn't left waiting.
+ */
+export function rejectApdu(sessionId: string, apduId: number) {
+  NativeHCEModule.respondApdu(sessionId, apduId, SW_NO_PRECISE_DIAGNOSIS).catch(() => {});
+}
+
 type SessionListener = (event: NativeHCEEvent) => void;
 
 const sessionListeners = new Map<string, SessionListener>();
@@ -221,8 +228,8 @@ function dispatchEvent(event: NativeHCEEvent) {
   if (listener) {
     listener(event);
   } else if (event.type === 'apdu') {
-    // nobody is listening, don't leave the reader waiting
-    NativeHCEModule.respondApdu(event.sessionId, event.apduId, SW_NO_PRECISE_DIAGNOSIS).catch(() => {});
+    // nobody is listening
+    rejectApdu(event.sessionId, event.apduId);
   }
 }
 

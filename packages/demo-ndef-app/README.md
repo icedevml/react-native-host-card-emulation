@@ -37,6 +37,13 @@ The emulated NDEF tag is recognized out of the box when it's scanned by another 
     ```
 2. (iOS) Press the "Run" button in XCode.
 
+## Android: background handling and the lock screen
+
+The app enables the library's background handler (the `com.itsecrnd.rtnhceandroid.background_handler_enabled` meta-data
+of `HCEService` in `android/app/src/main/AndroidManifest.xml`), so it handles the readers also when it's not open.
+Otherwise it keeps the library's secure defaults: the readers are only handled while the device is unlocked. See
+"Android: Enabling the background handler and the lock screen" in the library's README to change that.
+
 ## Tests
 
 Run `yarn test`. The tests use the library's Jest mock of its native module, see `jest.config.js`.

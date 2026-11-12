@@ -39,6 +39,10 @@
         <meta-data
           android:name="android.nfc.cardemulation.host_apdu_service"
           android:resource="@xml/aid_list" />
+        <!-- the demo handles the readers also without a session, see background.ts -->
+        <meta-data
+          android:name="com.itsecrnd.rtnhceandroid.background_handler_enabled"
+          android:value="true" />
       </service>
     </application>
 </manifest>

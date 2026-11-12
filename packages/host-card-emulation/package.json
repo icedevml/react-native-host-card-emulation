@@ -1,6 +1,6 @@
 {
   "name": "@icedevml/react-native-host-card-emulation",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Host Card Emulation (HCE) React Native Turbo Module for iOS and Android platforms.",
   "main": "js/index.ts",
   "types": "js/index.ts",
@@ -19,6 +19,7 @@
     "Package.swift",
     "react-native-spm-prefix.h",
     "!android/build",
+    "!android/src/test",
     "!ios/build",
     "!**/__tests__",
     "!**/__fixtures__",

@@ -17,7 +17,8 @@ export interface HCECapabilities {
    */
   readonly eligible: boolean;
   /**
-   * Whether registerBackgroundHandler() is supported (Android only).
+   * Whether registerBackgroundHandler() can be used: Android only, once the background handler is enabled
+   * in AndroidManifest.xml (it's disabled by default).
    */
   readonly backgroundSupported: boolean;
   /**
@@ -54,13 +55,17 @@ export type EmulationStopStatus = 'success' | 'failure';
 /**
  * Every handler receives the session as its last argument, so it doesn't have to rely on the variable
  * that the result of beginSession() is assigned to.
+ *
+ * Once the session is closed, the events that are still waiting for their turn are dropped (their C-APDUs
+ * are answered with the 6F00 status word) and only onInvalidated() is called.
  */
 export interface SessionHandlers {
   /**
-   * Handle the C-APDU and return the R-APDU. Called sequentially, the next C-APDU is never
-   * delivered before the previous call has finished. If the handler throws, returns an invalid
-   * response or doesn't finish within the handler timeout, the reader receives the 6F00 status word
-   * (no precise diagnosis).
+   * Handle the C-APDU and return the R-APDU. Called sequentially: the next C-APDU is delivered once
+   * the previous call has finished or timed out. A timed out call can't be cancelled, it keeps running
+   * (its result is ignored), so it might overlap with the next calls. If the handler throws, returns
+   * an invalid response or doesn't finish within the handler timeout, the reader receives the 6F00 status
+   * word (no precise diagnosis).
    */
   onApdu: (apdu: CommandAPDU, session: HCESession) => ResponseAPDU | Promise<ResponseAPDU>;
   /**
@@ -73,7 +78,11 @@ export interface SessionHandlers {
    */
   onReaderLost?: (session: HCESession) => void | Promise<void>;
   /**
-   * The session was closed and can't be used anymore.
+   * The session was closed and can't be used anymore. The reason:
+   * - 'userInvalidated': session.invalidate() was called (also through the AbortSignal);
+   * - iOS: the name of the CardSession.Error case that has ended the session, e.g. 'maxSessionDurationReached';
+   * - iOS: 'internalError: <description>' if the session's event stream has failed, 'unknown' if it has ended
+   *   without a reason.
    */
   onInvalidated?: (reason: string, session: HCESession) => void;
   /**
@@ -88,7 +97,8 @@ export interface HandlerOptions {
    * The maximum time (in milliseconds) a single handler call may take, including the returned promise.
    * Once it's exceeded, the handler's result is ignored, onError() receives an err_handler_timeout error
    * and the next event is delivered (a timed out onApdu() is responded to with the 6F00 status word).
-   * Without the limit, a handler that never finishes would block all the subsequent events.
+   * The timed out call can't be cancelled, it keeps running. Without the limit, a handler that never
+   * finishes would block all the subsequent events.
    *
    * Default: 10000. Pass 0 or Infinity to disable the timeout.
    */
@@ -96,10 +106,12 @@ export interface HandlerOptions {
   /**
    * Android: Whether the interaction is allowed while the device is locked. If false, the C-APDUs
    * received while the device is locked are never delivered to the handlers and the reader receives
-   * an error status word instead. Set it to false unless the app is meant to work on the lock screen.
+   * an error status word instead. Only set it to true if the app is meant to work on the lock screen,
+   * together with android:requireDeviceUnlock="false" in aid_list.xml (otherwise Android doesn't pass
+   * the C-APDUs of a locked device to the app at all).
    * iOS: Ignored, it's impossible to communicate over HCE while the device is locked.
    *
-   * Default: true.
+   * Default: false.
    */
   allowWhenLocked?: boolean;
 }

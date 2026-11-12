@@ -23,7 +23,9 @@ The root `package.json` has no scripts. Run commands inside the workspace direct
   the strictest compiler options on purpose: the TS sources are published and apps type-check them with
   their own settings, so keep the sources compiling under all of them.
 - Demo type-check and tests: `cd packages/demo-ndef-app && yarn tsc && yarn test`
-- CI runs the library type-check and tests, the demo tests and `yarn pack`.
+- Android JVM tests of the native module (JUnit, Robolectric, Mockito; `android/src/test`, needs the Android SDK
+  and `yarn install`): `cd packages/demo-ndef-app/android && ./gradlew :icedevml_react-native-host-card-emulation:testDebugUnitTest`
+- CI runs the library type-check and tests, the demo tests, `yarn pack` and the Android JVM tests.
 - Lint (demo only): `cd packages/demo-ndef-app && yarn lint` (the `no-bitwise` warnings in `ndef-lib/` are expected).
 - Android build (Android SDK, NDK 27.1, a JDK 17 installation - the React Native Gradle plugin requests
   a Java 17 toolchain): `cd packages/demo-ndef-app/android && ./gradlew assembleDebug`.
@@ -34,6 +36,7 @@ The root `package.json` has no scripts. Run commands inside the workspace direct
 
 HCE can't be exercised in emulators or simulators: it needs a physical device and an NFC reader, and on iOS
 also an Apple HCE entitlement (EEA). Native changes can usually only be compiled, not run - say so in your report.
+The Android routing state machine (`HCEManager`) is covered by the JVM tests, extend them when changing it.
 
 ## Library layout
 
@@ -48,7 +51,8 @@ also an Apple HCE entitlement (EEA). Native changes can usually only be compiled
   side) and `setup.js`, which installs it. Used by the library's and the demo's tests and by the apps' tests.
 - `android/src/main/java/com/itsecrnd/rtnhceandroid/`
   - `HCEManager.java` - process-wide state machine: the foreground session, the current activation, routing,
-    status words. Start here for any Android behavior.
+    status words. Start here for any Android behavior. Its `ApduService` and `HeadlessTasks` interfaces are
+    replaced in `android/src/test/.../HCEManagerTest.java` (not published, excluded in `files`).
   - `HCEService.java` - thin `HostApduService` adapter. Its callbacks must never throw (that crashes the app process).
   - `RTNHCEAndroidModule.java` - the TurboModule, also manages `CardEmulation.setPreferredService()`.
   - `BinaryUtils.java` - derived from Apache-2.0 code, keep its license header.
@@ -68,21 +72,28 @@ also an Apple HCE entitlement (EEA). Native changes can usually only be compiled
   to `apduId`, a stale one is rejected natively with `err_stale_apdu` (expected, ignored by JS).
   C-APDUs of sessions nobody listens to are answered with `6F00` by JS.
 - The handlers of one session (or one background interaction) run one at a time through `SerialQueue`,
-  each call is bounded by `handlerTimeout` (default 10 s).
+  each call is bounded by `handlerTimeout` (default 10 s). Once a session is closed, the events still waiting
+  in its queue are dropped (C-APDUs answered with `6F00`), only `onInvalidated()` runs.
 - Android: every interaction handled by a foreground session runs under the headless JS task
   `keepAliveHCESession` (the key is duplicated in `js/session.ts` and `HCEManager.java`), which keeps JS timers
   running while the app is in background. JS finishes it once the handlers of that interaction have finished.
 - Android: an activation is the link with a reader from the first C-APDU until `onDeactivated()`. Routing is
   decided when it starts: foreground session with running emulation, else the background handler (headless
   JS task `handleBackgroundHCECall`, the key is duplicated in `js/background.ts` and `HCEManager.java`), else
-  rejected (`6A82` for SELECT, `6985` otherwise). It waits up to 15 s for React Native to start and for JS to
+  rejected (`6A82` for SELECT, `6985` otherwise). The background handler is only used if the app enables it with
+  the `com.itsecrnd.rtnhceandroid.background_handler_enabled` meta-data of `HCEService` (disabled by default,
+  then React Native is never started for a reader). It waits up to 15 s for React Native to start and for JS to
   call `setBackgroundHandlerRegistered()`.
 - Android threading: `HCEManager` methods are `synchronized` and run on the main thread (service callbacks,
   headless task events) and on the JS / native modules threads. Never block on another thread while holding
   the lock. `HeadlessJsTaskContext` must be used on the main thread.
 - iOS threading: the mutable state of `RTNHCEModuleIOSImpl` is guarded by `lock`, never hold it across `await`.
-  Only one `CardSession` may exist per process, `beginSession` waits for the previous event loops to end.
-- Lock screen: `allowWhenLocked` is Android only and enforced natively. iOS can't do HCE while locked,
+  Only one `CardSession` may exist per process, `beginSession` waits for the previous (invalidated) starts
+  and event loops to end. An invalidated start frees the slot right away, like Android does. Separate `Task`s
+  run in an undefined order, so `startEmulation`, `stopEmulation` and `isEmulationRunning` are chained in call
+  order (`enqueueOperation()`); `invalidateSession` and `respondApdu` must never wait for that chain.
+- Lock screen: `allowWhenLocked` (default `false`) is Android only and enforced natively, the apps also keep
+  `android:requireDeviceUnlock="true"` unless they work on the lock screen. iOS can't do HCE while locked,
   `deviceLocked` is always `false` there.
 
 ## Platform gotchas
@@ -122,9 +133,10 @@ tables, search for every occurrence when changing one.
 
 ## CI and releases
 
-- `.github/workflows/nodejs-package.yml`: every push runs `yarn install --immutable`, the type-check, the tests
-  and `npm pack --dry-run`. Creating a GitHub Release runs `publish-npm` (environment `production`, npm trusted
-  publishing with provenance). Never publish manually.
+- `.github/workflows/nodejs-package.yml`: every push (and every pull request from a fork) runs
+  `yarn install --immutable`, the type-check, the tests and `npm pack --dry-run` (job `build`) and the Android JVM
+  tests (job `android`). Creating a GitHub Release runs `publish-npm` (environment `production`, npm trusted
+  publishing with provenance) once both have passed. Never publish manually.
 - Supply chain: `publish-npm` holds the OIDC token that can publish the package, so it must never install
   dependencies or run any third-party code: it publishes the tarball of `npm pack --ignore-scripts` (the package
   has no build step). The install scripts of the dependencies are disabled (`enableScripts: false` in
