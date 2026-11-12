@@ -1753,10 +1753,12 @@ __metadata:
     "@babel/core": "npm:^7.25.2"
     "@react-native/babel-preset": "npm:0.88.1"
     "@react-native/jest-preset": "npm:0.88.1"
+    "@react-native/typescript-config": "npm:0.88.1"
     "@types/jest": "npm:^29.5.13"
     jest: "npm:^29.6.3"
     react: "npm:19.3.0"
     react-native: "npm:0.88.1"
+    typescript: "npm:^6.0.3"
   peerDependencies:
     react: "*"
     react-native: "*"

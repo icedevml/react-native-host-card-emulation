@@ -18,9 +18,12 @@ The root `package.json` has no scripts. Run commands inside the workspace direct
 
 - Node.js (CI uses 26, the demo requires >= 22.11) and Yarn 4 through Corepack:
   `corepack enable && yarn install` at the repository root. Dependencies are hoisted to the root `node_modules`.
-- Library tests (CI runs only these and `yarn pack`): `cd packages/host-card-emulation && yarn test`
-- Type-check: the library has no `tsconfig.json`; the demo's one covers the library sources through
-  the workspace link: `cd packages/demo-ndef-app && yarn tsc`
+- Library tests: `cd packages/host-card-emulation && yarn test`
+- Library type-check: `cd packages/host-card-emulation && yarn typecheck`. Its `tsconfig.json` enables
+  the strictest compiler options on purpose: the TS sources are published and apps type-check them with
+  their own settings, so keep the sources compiling under all of them.
+- Demo type-check: `cd packages/demo-ndef-app && yarn tsc`
+- CI runs the library type-check, tests and `yarn pack`.
 - Lint (demo only): `cd packages/demo-ndef-app && yarn lint` (the `no-bitwise` warnings in `ndef-lib/` are expected).
 - Android build (Android SDK, NDK 27.1, a JDK 17 installation - the React Native Gradle plugin requests
   a Java 17 toolchain): `cd packages/demo-ndef-app/android && ./gradlew assembleDebug`.

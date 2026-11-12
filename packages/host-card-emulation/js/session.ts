@@ -1,6 +1,6 @@
 import {AppRegistry, Platform} from 'react-native';
 
-import NativeHCEModule, {NativeHCEEvent} from './NativeHCEModule';
+import NativeHCEModule, {type NativeHCEEvent} from './NativeHCEModule';
 import {
   addSessionListener,
   callHandler,

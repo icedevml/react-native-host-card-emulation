@@ -24,6 +24,9 @@ jobs:
       - run: yarn install --immutable
       - run: |
           cd packages/host-card-emulation
+          yarn typecheck
+      - run: |
+          cd packages/host-card-emulation
           yarn test
       - run: |
           cd packages/host-card-emulation

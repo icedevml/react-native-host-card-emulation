@@ -1,6 +1,6 @@
 import type {EventSubscription} from 'react-native';
 
-import NativeHCEModule, {NativeHCEEvent} from './NativeHCEModule';
+import NativeHCEModule, {type NativeHCEEvent} from './NativeHCEModule';
 import type {ApduHandler, HandlerOptions, ResponseAPDU} from './types';
 
 // ISO 7816-4: no precise diagnosis
@@ -27,11 +27,11 @@ export function bytesToHex(bytes: ResponseAPDU): string {
   for (let i = 0; i < bytes.length; i++) {
     const b = bytes[i];
 
-    if (!Number.isInteger(b) || b < 0 || b > 0xff) {
+    if (b === undefined || !Number.isInteger(b) || b < 0 || b > 0xff) {
       throw new HCEError('err_invalid_rapdu', `Invalid byte value at index ${i}: ${b}`);
     }
 
-    out += HEX_CHARS[b >> 4] + HEX_CHARS[b & 0x0f];
+    out += HEX_CHARS.charAt(b >> 4) + HEX_CHARS.charAt(b & 0x0f);
   }
 
   return out;
