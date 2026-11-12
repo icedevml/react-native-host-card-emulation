@@ -1,9 +1,9 @@
 <host-apdu-service xmlns:android="http://schemas.android.com/apk/res/android"
                    android:description="@string/app_name"
-                   android:requireDeviceUnlock="false">
+                   android:requireDeviceUnlock="true">
     <aid-group android:category="other"
                android:description="@string/app_name">
-        <!-- Create a separate <aid-filer /> node for each NFC application ID, that You intent to emulate/host. -->
+        <!-- Create a separate <aid-filter /> node for each NFC application ID, that You intend to emulate/host. -->
         <!-- For the NFC Type 4 tag emulation, let's put "D2760000850101" -->
         <aid-filter android:name="D2760000850101" />
     </aid-group>

@@ -12,9 +12,9 @@
   "dependencies": {
     "@icedevml/react-native-host-card-emulation": "workspace:^",
     "@react-native/new-app-screen": "0.88.1",
+    "buffer": "^6.0.3",
     "react": "19.3.0",
     "react-native": "0.88.1",
-    "react-native-buffer": "^6.0.4",
     "react-native-safe-area-context": "^5.11.1"
   },
   "devDependencies": {

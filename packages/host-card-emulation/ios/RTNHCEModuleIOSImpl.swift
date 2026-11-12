@@ -60,9 +60,14 @@ enum HexCoding {
     let apdu: CardSession.APDU
   }
 
-  private struct EmulationStart {
+  /// A beginSession() call that hasn't finished yet. `invalidateRequested` is guarded by `lock`.
+  private final class SessionStart {
     let sessionId: String
-    let task: Task<Void, Error>
+    var invalidateRequested = false
+
+    init(sessionId: String) {
+      self.sessionId = sessionId
+    }
   }
 
   // how long beginSession() waits for the previous CardSession to end
@@ -77,13 +82,16 @@ enum HexCoding {
   private let lock = NSLock()
   private var currentSessionId: String? = nil
   private var currentSession: CardSession? = nil
-  private var startingSessionId: String? = nil
-  private var startingSessionInvalidateRequested: Bool = false
+  // the start that may still become the current session, nil once it's invalidated or finished
+  private var activeStart: SessionStart? = nil
+  // the number of the starts that haven't finished yet, including the invalidated ones
+  private var unfinishedStarts: Int = 0
   private var pendingAPDU: PendingAPDU? = nil
   private var lastAPDUId: Int64 = 0
   // the number of event loops that are still running, including the ones of invalidated sessions
   private var runningEventLoops: Int = 0
-  private var emulationStart: EmulationStart? = nil
+  // the last operation of the serial chain, see enqueueOperation()
+  private var lastOperation: Task<Void, Never>? = nil
   private var presentmentIntent: NFCPresentmentIntentAssertion? = nil
   private var presentmentIntentAcquiring: Bool = false
   private var emitOnEvent: ((NSDictionary) -> ())? = nil
@@ -113,11 +121,16 @@ enum HexCoding {
     return currentSessionId == sessionId ? currentSession : nil
   }
 
-  /// Only a single CardSession may exist at a time, so wait until the event loops of the previous ones have ended.
-  private func waitForPreviousSessionsToEnd() async -> Bool {
+  /**
+   Only a single CardSession may exist at a time, so wait until the other starts have finished (they might still
+   create a CardSession) and the event loops of the previous sessions have ended. Stops waiting once the given start
+   is invalidated. Returns false on timeout.
+   */
+  private func waitForPreviousSessionsToEnd(_ start: SessionStart) async -> Bool {
     var waited: UInt64 = 0
 
-    while synchronized({ self.runningEventLoops > 0 }) {
+    // the given start is one of the unfinished ones
+    while synchronized({ !start.invalidateRequested && (self.runningEventLoops > 0 || self.unfinishedStarts > 1) }) {
       if waited >= Self.previousSessionEndTimeout {
         return false
       }
@@ -127,6 +140,32 @@ enum HexCoding {
     }
 
     return true
+  }
+
+  /// Must be called while holding the lock.
+  private func finishStart(_ start: SessionStart) {
+    if activeStart === start {
+      activeStart = nil
+    }
+
+    unfinishedStarts -= 1
+  }
+
+  /**
+   Run the operation once the previously enqueued ones have finished. Separate Tasks would run in an undefined order,
+   so startEmulation(), stopEmulation() and isEmulationRunning() are chained in the order of the TurboModule calls,
+   e.g. stopEmulation() called right after startEmulation() never runs first. invalidateSession() and respondApdu()
+   stay out of the chain, they must not wait for startEmulation(), which might be waiting for the system UI.
+   */
+  private func enqueueOperation(_ operation: @escaping () async -> Void) {
+    synchronized {
+      let previous = self.lastOperation
+
+      self.lastOperation = Task {
+        _ = await previous?.value
+        await operation()
+      }
+    }
   }
 
   @objc public func setEmitOnEvent(emitOnEvent: @escaping (NSDictionary) -> ()) {
@@ -223,43 +262,61 @@ enum HexCoding {
 
   @objc public func beginSession(sessionId: NSString, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
     let sessionId = String(sessionId)
+    let start = SessionStart(sessionId: sessionId)
+
+    /*
+     Reserve the session slot right away, before the first `await`. The TurboModule calls the asynchronous
+     methods one after another on its method queue, so invalidateSession() called right after this method
+     (e.g. when the start is aborted) always finds the reservation instead of being lost. An invalidated start
+     frees the slot right away, so that the next session can begin while it's finishing: the next one waits for it
+     in waitForPreviousSessionsToEnd().
+     */
+    let canStart = synchronized { () -> Bool in
+      if self.currentSession != nil || self.activeStart != nil {
+        return false
+      }
+
+      self.activeStart = start
+      self.unfinishedStarts += 1
+      return true
+    }
+
+    guard canStart else {
+      reject("err_session_exists", "A session already exists.", nil)
+      return
+    }
+
+    // finishes the start and rejects
+    let fail = { (code: String, message: String) in
+      self.synchronized { self.finishStart(start) }
+      reject(code, message, nil)
+    }
 
     Task.init {
       guard NFCReaderSession.readingAvailable else {
-        reject("err_nfc_reader_not_available", "Preflight check failed: NFCReaderSession.readingAvailable is false", nil)
+        fail("err_nfc_reader_not_available", "Preflight check failed: NFCReaderSession.readingAvailable is false")
         return
       }
 
       guard CardSession.isSupported else {
-        reject("err_card_session_unsupported", "Preflight check failed: CardSession.isSupported is false", nil)
+        fail("err_card_session_unsupported", "Preflight check failed: CardSession.isSupported is false")
         return
       }
 
       guard await CardSession.isEligible else {
-        reject("err_card_session_not_eligible", "Preflight check failed: CardSession.isEligible is false", nil)
-        return
-      }
-
-      // reserve the session slot atomically, so that concurrent calls can't both pass the check
-      let canStart = self.synchronized { () -> Bool in
-        if self.currentSession != nil || self.startingSessionId != nil {
-          return false
-        }
-
-        self.startingSessionId = sessionId
-        self.startingSessionInvalidateRequested = false
-        return true
-      }
-
-      guard canStart else {
-        reject("err_session_exists", "A session already exists.", nil)
+        fail("err_card_session_not_eligible", "Preflight check failed: CardSession.isEligible is false")
         return
       }
 
       // the previous session might still be ending, e.g. if it was invalidated right before this call
-      guard await self.waitForPreviousSessionsToEnd() else {
-        self.synchronized { self.startingSessionId = nil }
-        reject("err_session_exists", "The previous session is still being closed.", nil)
+      guard await self.waitForPreviousSessionsToEnd(start) else {
+        fail("err_session_exists", "The previous session is still being closed.")
+        return
+      }
+
+      // invalidateSession() was called during the checks above, don't create the CardSession at all
+      guard !self.synchronized({ start.invalidateRequested }) else {
+        fail("err_session_invalidated", "The session was invalidated while it was being started.")
         return
       }
 
@@ -268,17 +325,17 @@ enum HexCoding {
       do {
         session = try await CardSession()
       } catch (let error) {
-        self.synchronized { self.startingSessionId = nil }
-        reject("err_create_card_session", "Failed to create CardSession: \(error)", nil)
+        fail("err_create_card_session", "Failed to create CardSession: \(error)")
         return
       }
 
       let invalidateRequested = self.synchronized { () -> Bool in
-        self.startingSessionId = nil
+        // together with counting the event loop, so that a waiting start always sees one of them
+        self.finishStart(start)
         // the event loop below runs in both cases
         self.runningEventLoops += 1
 
-        if self.startingSessionInvalidateRequested {
+        if start.invalidateRequested {
           // invalidateSession() was called while the session was being created
           return true
         }
@@ -382,8 +439,9 @@ enum HexCoding {
     let sessionId = String(sessionId)
 
     let session = synchronized { () -> CardSession? in
-      if self.startingSessionId == sessionId {
-        self.startingSessionInvalidateRequested = true
+      if let start = self.activeStart, start.sessionId == sessionId {
+        start.invalidateRequested = true
+        self.activeStart = nil
       }
 
       guard self.currentSessionId == sessionId else {
@@ -403,8 +461,9 @@ enum HexCoding {
   /// Called when the native module is being torn down (e.g. JS reload).
   @objc public func invalidateAll() {
     let session = synchronized { () -> CardSession? in
-      if self.startingSessionId != nil {
-        self.startingSessionInvalidateRequested = true
+      if let start = self.activeStart {
+        start.invalidateRequested = true
+        self.activeStart = nil
       }
 
       let current = self.currentSession
@@ -427,48 +486,25 @@ enum HexCoding {
   @objc public func startEmulation(sessionId: NSString, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
     let sessionId = String(sessionId)
 
-    Task.init {
-      // concurrent calls share a single attempt, so that the emulation is never started twice
-      let task = self.synchronized { () -> Task<Void, Error>? in
-        guard let session = self.sessionIfCurrent(sessionId) else {
-          return nil
-        }
-
-        if let start = self.emulationStart, start.sessionId == sessionId {
-          return start.task
-        }
-
-        let task = Task<Void, Error> {
-          if await session.isEmulationInProgress {
-            return
-          }
-
-          try await session.startEmulation()
-        }
-
-        self.emulationStart = EmulationStart(sessionId: sessionId, task: task)
-        return task
-      }
-
-      guard let task = task else {
+    enqueueOperation {
+      guard let session = self.synchronized({ self.sessionIfCurrent(sessionId) }) else {
         reject("err_no_session", "The session is not active.", nil)
         return
       }
 
-      let result = await task.result
+      do {
+        // a repeated call finds the emulation started by the previous one, as the operations are chained
+        let inProgress = await session.isEmulationInProgress
 
-      self.synchronized {
-        if self.emulationStart?.task == task {
-          self.emulationStart = nil
+        if !inProgress {
+          try await session.startEmulation()
         }
+      } catch (let error) {
+        reject("err_start_emulation", "Error trying to start emulation. \(error)", nil)
+        return
       }
 
-      switch result {
-      case .success:
-        resolve(nil)
-      case .failure(let error):
-        reject("err_start_emulation", "Error trying to start emulation. \(error)", nil)
-      }
+      resolve(nil)
     }
   }
 
@@ -476,7 +512,7 @@ enum HexCoding {
     let sessionId = String(sessionId)
     let success = String(status) == "success"
 
-    Task.init {
+    enqueueOperation {
       let session = self.synchronized { () -> CardSession? in
         let session = self.sessionIfCurrent(sessionId)
 
@@ -500,7 +536,7 @@ enum HexCoding {
   @objc public func isEmulationRunning(sessionId: NSString, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
     let sessionId = String(sessionId)
 
-    Task.init {
+    enqueueOperation {
       guard let session = self.synchronized({ self.sessionIfCurrent(sessionId) }) else {
         resolve(false)
         return

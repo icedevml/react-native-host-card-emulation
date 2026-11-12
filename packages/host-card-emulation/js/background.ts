@@ -32,13 +32,14 @@ if (Platform.OS === 'android') {
   /*
    Until the JS side declares whether it has a background handler, the native side holds the
    interactions instead of rejecting them, as React Native might still be evaluating the bundle.
-   The handler is registered at the top level of the entry file, so the timer fires after that.
+   The handler is registered at the top level of the entry file and the microtask runs once the whole
+   bundle has been evaluated. A timer wouldn't do: timers don't fire while the app is started in background.
    */
-  setTimeout(() => {
+  Promise.resolve().then(() => {
     if (!taskRegistered) {
-      NativeHCEModule.setBackgroundHandlerRegistered(false, true);
+      NativeHCEModule.setBackgroundHandlerRegistered(false, false);
     }
-  }, 0);
+  });
 }
 
 interface BackgroundTaskData {
@@ -127,6 +128,10 @@ async function runBackgroundTask(data: BackgroundTaskData): Promise<void> {
  * with running emulation - i.e. the app is in background, not running at all or it's in foreground
  * without an active session (check BackgroundContext.appState).
  *
+ * The background handler is disabled by default, the app has to enable it with the
+ * `com.itsecrnd.rtnhceandroid.background_handler_enabled` <meta-data> of HCEService in AndroidManifest.xml.
+ * Otherwise the readers are rejected natively and the app is never started for them (a warning is logged).
+ *
  * Call it once, at the top level of the app's entry file (index.js), before AppRegistry.registerComponent().
  * Calling it again replaces the previous factory and its options. No-op on iOS.
  */
@@ -151,6 +156,14 @@ export function registerBackgroundHandler(
   }
 
   NativeHCEModule.setBackgroundHandlerRegistered(true, allowWhenLocked);
+
+  if (!NativeHCEModule.isBackgroundHandlerEnabled()) {
+    console.warn(
+      '[HCE] The background handler is disabled, it will never be called. Enable it by adding ' +
+        '<meta-data android:name="com.itsecrnd.rtnhceandroid.background_handler_enabled" android:value="true" /> ' +
+        'to HCEService in AndroidManifest.xml (see the README of @icedevml/react-native-host-card-emulation).',
+    );
+  }
 }
 
 /**
@@ -164,5 +177,5 @@ export function unregisterBackgroundHandler(): void {
   }
 
   currentRegistration = null;
-  NativeHCEModule.setBackgroundHandlerRegistered(false, true);
+  NativeHCEModule.setBackgroundHandlerRegistered(false, false);
 }

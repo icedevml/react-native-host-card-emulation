@@ -1,6 +1,6 @@
 import type {EventSubscription} from 'react-native';
 
-import NativeHCEModule, {NativeHCEEvent} from './NativeHCEModule';
+import NativeHCEModule, {type NativeHCEEvent} from './NativeHCEModule';
 import type {ApduHandler, HandlerOptions, ResponseAPDU} from './types';
 
 // ISO 7816-4: no precise diagnosis
@@ -21,17 +21,43 @@ export class HCEError extends Error {
   }
 }
 
+/**
+ * The native side rejects with plain errors having a `code`, turn them into HCEError (keeping the original
+ * error as `cause`), so that the apps can rely on `instanceof HCEError`.
+ */
+export function toHCEError(error: unknown): unknown {
+  if (error instanceof HCEError || typeof error !== 'object' || error === null) {
+    return error;
+  }
+
+  const {code, message} = error as {code?: unknown; message?: unknown};
+
+  if (typeof code !== 'string') {
+    return error;
+  }
+
+  const hceError = new HCEError(code, typeof message === 'string' ? message : code);
+  hceError.cause = error;
+  return hceError;
+}
+
+export function callNative<T>(promise: Promise<T>): Promise<T> {
+  return promise.catch(e => {
+    throw toHCEError(e);
+  });
+}
+
 export function bytesToHex(bytes: ResponseAPDU): string {
   let out = '';
 
   for (let i = 0; i < bytes.length; i++) {
     const b = bytes[i];
 
-    if (!Number.isInteger(b) || b < 0 || b > 0xff) {
+    if (b === undefined || !Number.isInteger(b) || b < 0 || b > 0xff) {
       throw new HCEError('err_invalid_rapdu', `Invalid byte value at index ${i}: ${b}`);
     }
 
-    out += HEX_CHARS[b >> 4] + HEX_CHARS[b & 0x0f];
+    out += HEX_CHARS.charAt(b >> 4) + HEX_CHARS.charAt(b & 0x0f);
   }
 
   return out;
@@ -75,7 +101,7 @@ export interface ResolvedHandlerOptions {
 }
 
 export function resolveHandlerOptions(options: HandlerOptions): ResolvedHandlerOptions {
-  const {handlerTimeout = DEFAULT_HANDLER_TIMEOUT, allowWhenLocked = true} = options;
+  const {handlerTimeout = DEFAULT_HANDLER_TIMEOUT, allowWhenLocked = false} = options;
 
   if (
     typeof handlerTimeout !== 'number' ||
@@ -179,9 +205,16 @@ export async function processApdu(
   } catch (e) {
     // the reader was lost or the session was closed in the meantime, that's expected
     if (!isErrorCode(e, 'err_stale_apdu')) {
-      reportError(onError, e);
+      reportError(onError, toHCEError(e));
     }
   }
+}
+
+/**
+ * Respond to the C-APDU that no handler is going to process, so that the reader isn't left waiting.
+ */
+export function rejectApdu(sessionId: string, apduId: number) {
+  NativeHCEModule.respondApdu(sessionId, apduId, SW_NO_PRECISE_DIAGNOSIS).catch(() => {});
 }
 
 type SessionListener = (event: NativeHCEEvent) => void;
@@ -195,8 +228,8 @@ function dispatchEvent(event: NativeHCEEvent) {
   if (listener) {
     listener(event);
   } else if (event.type === 'apdu') {
-    // nobody is listening, don't leave the reader waiting
-    NativeHCEModule.respondApdu(event.sessionId, event.apduId, SW_NO_PRECISE_DIAGNOSIS).catch(() => {});
+    // nobody is listening
+    rejectApdu(event.sessionId, event.apduId);
   }
 }
 

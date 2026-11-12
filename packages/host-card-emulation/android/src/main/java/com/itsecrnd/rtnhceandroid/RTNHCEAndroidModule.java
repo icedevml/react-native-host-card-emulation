@@ -204,6 +204,10 @@ public class RTNHCEAndroidModule extends NativeHCEModuleSpec {
                 && pm.hasSystemFeature(PackageManager.FEATURE_NFC_HOST_CARD_EMULATION);
     }
 
+    private boolean isBackgroundHandlerEnabledInManifest() {
+        return HCEManager.getInstance().isBackgroundHandlerEnabled(getReactApplicationContext());
+    }
+
     @Override
     public void getCapabilities(Promise promise) {
         boolean hceSupported = isHCESupported();
@@ -221,7 +225,7 @@ public class RTNHCEAndroidModule extends NativeHCEModuleSpec {
         map.putBoolean("hceSupported", hceSupported);
         map.putBoolean("nfcEnabled", nfcEnabled);
         map.putBoolean("eligible", hceSupported);
-        map.putBoolean("backgroundSupported", hceSupported);
+        map.putBoolean("backgroundSupported", hceSupported && isBackgroundHandlerEnabledInManifest());
         map.putBoolean("presentmentSupported", false);
         promise.resolve(map);
     }
@@ -336,5 +340,10 @@ public class RTNHCEAndroidModule extends NativeHCEModuleSpec {
     @Override
     public boolean backgroundSessionReady(String sessionId) {
         return HCEManager.getInstance().backgroundSessionReady(this, sessionId);
+    }
+
+    @Override
+    public boolean isBackgroundHandlerEnabled() {
+        return isBackgroundHandlerEnabledInManifest();
     }
 }
