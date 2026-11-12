@@ -128,3 +128,5 @@ tables, search for every occurrence when changing one.
 - The version lives in `packages/host-card-emulation/package.json`, version bumps are separate PRs
   ("Bump version to X.Y.Z"). Work on a branch and open a PR against `master`.
 - GitHub Actions are pinned by commit SHA, keep it that way when updating them.
+- `packages/host-card-emulation/LICENSE` is a copy of the root `LICENSE` (only the package's own one gets
+  published), keep them identical.
