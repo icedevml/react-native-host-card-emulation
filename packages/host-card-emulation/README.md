@@ -15,7 +15,8 @@ Host Card Emulation Module for React Native on iOS and Android platforms.
 
 ## Prerequisites
 This package was designed for React Native [New Architecture](https://reactnative.dev/architecture/landing-page) only.
-Make sure that your project has it enabled. Note that the New Architecture is enabled by default for React Native 0.76+ projects.
+It's enabled by default since React Native 0.76 and it's the only architecture since React Native 0.82. The package
+is developed and tested with React Native 0.88.
 
 ### iOS
 1. Ensure that you are enrolled as organization (not individual) in Apple Developer Program, and that you are established in the European Economic Area (EEA).
@@ -26,7 +27,7 @@ Make sure that your project has it enabled. Note that the New Architecture is en
 
 ### Android
 1. Ensure that your app's `minSdkVersion` is at least 24 (Android 7.0). This is the floor imposed by React Native's New Architecture; the Host Card Emulation APIs used by this package are available since Android 5.1.
-2. Note that HCE availability also depends on the device hardware - always check `isPlatformSupported()` before starting a session.
+2. Note that HCE availability also depends on the device hardware - always check `HCE.getCapabilities()` (`hceSupported` and `nfcEnabled`) before starting a session.
 
 ## Installation
 Install this package within your React Native project:
@@ -133,10 +134,11 @@ Afterwards, follow the subsections below for each platform that you need to supp
 import HCE from '@icedevml/react-native-host-card-emulation';
 ```
 
-The library guarantees that **every C-APDU is responded to exactly once**: your handler returns the R-APDU and the library
-sends it. If the handler throws an exception or returns an invalid response, the reader receives the `6F00` status word
-(no precise diagnosis). Responses are bound to the C-APDU they were produced for, so a late response can never be sent
-as a reply to a different command.
+The library guarantees that **every C-APDU is responded to exactly once** (unless the reader is lost or the session
+is closed in the meantime): your handler returns the R-APDU and the library sends it. If the handler throws an exception,
+returns an invalid response or doesn't finish in time, the reader receives the `6F00` status word (no precise diagnosis).
+Responses are bound to the C-APDU they were produced for, so a late response can never be sent as a reply to a different
+command.
 
 All the handlers of a given session are called sequentially - the next event is never delivered before the handler
 of the previous one has finished (including the returned promise). A handler that doesn't finish within the handler
@@ -260,7 +262,8 @@ Keep `android:requireDeviceUnlock="false"` in `aid_list.xml` regardless of this 
 
 | Situation | Status word |
 |---|---|
-| The handler has thrown an exception or returned an invalid response | `6F00` (no precise diagnosis) |
+| The handler has thrown an exception, returned an invalid response or hasn't finished within the handler timeout | `6F00` (no precise diagnosis) |
+| The C-APDU has arrived for a session that is already closed on the JS side (e.g. right after `invalidate()`) | `6F00` (no precise diagnosis) |
 | Android: nobody can handle the interaction (or the device is locked with `allowWhenLocked: false`), response to SELECT | `6A82` (file or application not found) |
 | Android: nobody can handle the interaction (or the device is locked with `allowWhenLocked: false`), response to other commands | `6985` (conditions of use not satisfied) |
 
@@ -302,6 +305,8 @@ Register the handler at the top level of your app's entry file (`index.js`):
 ```typescript
 import { AppRegistry } from 'react-native';
 import HCE from '@icedevml/react-native-host-card-emulation';
+import App from './App';
+import { name as appName } from './app.json';
 
 HCE.registerBackgroundHandler(({ sessionId, appState }) => {
     // called once per interaction with the reader - keep the state of the interaction in this closure
@@ -341,6 +346,10 @@ where the HCE should only work after the user explicitly started it) and `HCE.re
 While React Native is starting (e.g. the app wasn't running), the interaction is held until the entry file
 has been evaluated, so that the background handler registered there is used. If that doesn't happen within 15 seconds
 (e.g. the JS bundle has crashed), the interaction is rejected.
+
+Only the JS code knows whether there is a background handler, so whenever a reader selects one of your AIDs while
+the app isn't running, Android starts the app's process and React Native in background - also when your app doesn't
+register a background handler at all (the reader is then rejected as soon as the entry file has been evaluated).
 
 The decision is made when the reader selects the application and it doesn't change until the reader is lost. If the interaction
 was rejected, the reader may re-select the application later (e.g. after you have started the emulation) and it will be routed again.
