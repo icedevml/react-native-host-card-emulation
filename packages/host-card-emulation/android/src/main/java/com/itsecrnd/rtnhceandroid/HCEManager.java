@@ -32,13 +32,15 @@ import java.util.UUID;
  * - the foreground session (created by the JS app through beginSession());
  * - the current activation, i.e. the link with the reader since the first C-APDU until deactivation.
  * <p>
- * All methods are synchronized, as they're called from the main thread (HostApduService callbacks,
- * headless task lifecycle) and from the JS thread (module methods). None of them blocks on the
- * other thread: event emission and sendResponseApdu() are both asynchronous.
+ * The methods touching the state are synchronized, as they're called from the main thread (HostApduService
+ * callbacks, headless task lifecycle), from the native modules thread (asynchronous module methods) and from
+ * the JS thread (synchronous module methods). None of them blocks on another thread: event emission
+ * and sendResponseApdu() are both asynchronous.
  */
 final class HCEManager {
     private static final String TAG = "HCEManager";
 
+    // must match BACKGROUND_TASK_KEY in js/background.ts
     static final String BACKGROUND_TASK_KEY = "handleBackgroundHCECall";
     // must match KEEP_ALIVE_TASK_KEY in js/session.ts
     static final String KEEP_ALIVE_TASK_KEY = "keepAliveHCESession";
@@ -419,7 +421,7 @@ final class HCEManager {
     /**
      * The React context exists before the JS bundle is evaluated, so the module (or the JS side's
      * declaration of the background handler) might not be there yet. In such case, the activation
-     * holds the C-APDU until onBackgroundHandlerDeclared() or the reader is lost.
+     * holds the C-APDU until onBackgroundHandlerDeclared(), the routing timeout or the reader is lost.
      */
     // must be called on the main thread
     private void routeToBackgroundHandler(Activation a, @Nullable RTNHCEAndroidModule module, ReactContext reactContext) {
@@ -542,7 +544,7 @@ final class HCEManager {
     }
 
     /* ---------------------------------------------------------------------------------------------
-     * Module callbacks (JS thread, main thread for headless task events)
+     * Module callbacks (native modules and JS threads, main thread for headless task events)
      * ------------------------------------------------------------------------------------------- */
 
     synchronized void beginSession(RTNHCEAndroidModule module, String sessionId, boolean allowWhenLocked) {
