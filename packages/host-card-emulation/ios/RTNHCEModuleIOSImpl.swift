@@ -53,6 +53,51 @@ enum HexCoding {
   }
 }
 
+/**
+ Process-wide bookkeeping of the CardSession slot: only a single CardSession may exist per process, but React Native
+ creates a new module instance (and RTNHCEModuleIOSImpl) on every reload, while the session of the previous instance
+ might still be ending. Its lock is taken while holding the lock of an RTNHCEModuleIOSImpl, never the other way round.
+ */
+private final class CardSessionSlot: @unchecked Sendable {
+  static let shared = CardSessionSlot()
+
+  private let lock = NSLock()
+  // the number of the beginSession() calls that haven't finished yet, including the invalidated ones
+  private var unfinishedStarts: Int = 0
+  // the number of the event loops that are still running, including the ones of invalidated sessions
+  private var runningEventLoops: Int = 0
+
+  func startBegan() {
+    lock.lock()
+    defer { lock.unlock() }
+    unfinishedStarts += 1
+  }
+
+  /// Together with counting the event loop, so that a waiting start always sees one of them.
+  func startFinished(eventLoopStarted: Bool) {
+    lock.lock()
+    defer { lock.unlock() }
+    unfinishedStarts -= 1
+
+    if eventLoopStarted {
+      runningEventLoops += 1
+    }
+  }
+
+  func eventLoopEnded() {
+    lock.lock()
+    defer { lock.unlock() }
+    runningEventLoops -= 1
+  }
+
+  /// Whether another CardSession might still exist or be created, the caller is one of the unfinished starts.
+  var isTakenByOthers: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return runningEventLoops > 0 || unfinishedStarts > 1
+  }
+}
+
 @available(iOS 17.4, *)
 @objc public class RTNHCEModuleIOSImpl: NSObject {
   private struct PendingAPDU {
@@ -84,8 +129,6 @@ enum HexCoding {
   private var currentSession: CardSession? = nil
   // the start that may still become the current session, nil once it's invalidated or finished
   private var activeStart: SessionStart? = nil
-  // the number of the starts that haven't finished yet, including the invalidated ones
-  private var unfinishedStarts: Int = 0
   private var pendingAPDU: PendingAPDU? = nil
   /*
    The current session has reported readerDetected that hasn't been followed by readerLost yet. iOS doesn't report
@@ -93,8 +136,6 @@ enum HexCoding {
    */
   private var readerPresent: Bool = false
   private var lastAPDUId: Int64 = 0
-  // the number of event loops that are still running, including the ones of invalidated sessions
-  private var runningEventLoops: Int = 0
   // the last operation of the serial chain, see enqueueOperation()
   private var lastOperation: Task<Void, Never>? = nil
   private var presentmentIntent: NFCPresentmentIntentAssertion? = nil
@@ -127,15 +168,14 @@ enum HexCoding {
   }
 
   /**
-   Only a single CardSession may exist at a time, so wait until the other starts have finished (they might still
-   create a CardSession) and the event loops of the previous sessions have ended. Stops waiting once the given start
-   is invalidated. Returns false on timeout.
+   Only a single CardSession may exist per process, so wait until the other starts have finished (they might still
+   create a CardSession) and the event loops of the previous sessions have ended, also the ones of the module instances
+   torn down by a reload. Stops waiting once the given start is invalidated. Returns false on timeout.
    */
   private func waitForPreviousSessionsToEnd(_ start: SessionStart) async -> Bool {
     var waited: UInt64 = 0
 
-    // the given start is one of the unfinished ones
-    while synchronized({ !start.invalidateRequested && (self.runningEventLoops > 0 || self.unfinishedStarts > 1) }) {
+    while synchronized({ !start.invalidateRequested && CardSessionSlot.shared.isTakenByOthers }) {
       if waited >= Self.previousSessionEndTimeout {
         return false
       }
@@ -148,12 +188,12 @@ enum HexCoding {
   }
 
   /// Must be called while holding the lock.
-  private func finishStart(_ start: SessionStart) {
+  private func finishStart(_ start: SessionStart, eventLoopStarted: Bool = false) {
     if activeStart === start {
       activeStart = nil
     }
 
-    unfinishedStarts -= 1
+    CardSessionSlot.shared.startFinished(eventLoopStarted: eventLoopStarted)
   }
 
   /**
@@ -282,7 +322,7 @@ enum HexCoding {
       }
 
       self.activeStart = start
-      self.unfinishedStarts += 1
+      CardSessionSlot.shared.startBegan()
       return true
     }
 
@@ -335,10 +375,8 @@ enum HexCoding {
       }
 
       let invalidateRequested = self.synchronized { () -> Bool in
-        // together with counting the event loop, so that a waiting start always sees one of them
-        self.finishStart(start)
         // the event loop below runs in both cases
-        self.runningEventLoops += 1
+        self.finishStart(start, eventLoopStarted: true)
 
         if start.invalidateRequested {
           // invalidateSession() was called while the session was being created
@@ -453,7 +491,7 @@ enum HexCoding {
     }
 
     // only now a new CardSession can be created
-    synchronized { self.runningEventLoops -= 1 }
+    CardSessionSlot.shared.eventLoopEnded()
     emit(sessionId, "sessionInvalidated", reason: invalidationReason ?? "unknown")
   }
 
@@ -555,8 +593,24 @@ enum HexCoding {
 
       await session.stopEmulation(status: success ? .success : .failure)
 
+      // a reader detected while the emulation was being stopped won't be deselected either
+      let detectedWhileStopping = self.synchronized { () -> Bool in
+        guard self.currentSessionId == sessionId else {
+          return false
+        }
+
+        let present = self.readerPresent
+        self.readerPresent = false
+        self.pendingAPDU = nil
+        return present
+      }
+
       // the link with the reader has ended, but iOS doesn't report readerDeselected after stopEmulation()
       if wasPresent {
+        self.emit(sessionId, "readerLost")
+      }
+
+      if detectedWhileStopping {
         self.emit(sessionId, "readerLost")
       }
 
@@ -610,11 +664,40 @@ enum HexCoding {
       do {
         try await pending.apdu.respond(response: response)
       } catch (let error) {
-        reject("err_apdu_respond", "Error trying to respond to APDU. \(error)", nil)
+        if await self.isLinkGone(sessionId: sessionId, apduId: apduId) {
+          // the reader was lost while responding, that's expected like on Android
+          reject("err_stale_apdu", "The C-APDU is not awaiting a response (reader lost or session closed).", nil)
+        } else {
+          reject("err_apdu_respond", "Error trying to respond to APDU. \(error)", nil)
+        }
+
         return
       }
 
       resolve(nil)
     }
+  }
+
+  // how long a failed response waits for the event loop to process the readerDeselected event that caused the failure
+  private static let linkGoneGracePeriod: UInt64 = 100_000_000
+
+  /**
+   Whether a failed response is explained by the link with the reader having ended: the session was closed,
+   the reader was deselected (also by stopEmulation()) or the reader has already sent the next C-APDU.
+   */
+  private func isLinkGone(sessionId: String, apduId: Int64) async -> Bool {
+    let check = { () -> Bool in
+      self.synchronized {
+        self.currentSessionId != sessionId || !self.readerPresent || self.lastAPDUId != apduId
+      }
+    }
+
+    if check() {
+      return true
+    }
+
+    // the failure is usually observed before the event stream delivers readerDeselected
+    try? await Task.sleep(nanoseconds: Self.linkGoneGracePeriod)
+    return check()
   }
 }
