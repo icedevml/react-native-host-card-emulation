@@ -99,7 +99,8 @@ The Android routing state machine (`HCEManager`) is covered by the JVM tests, ex
 ## Platform gotchas
 
 - TurboModule methods returning `void` or a `Promise` run asynchronously, in call order, on the module's
-  native queue. Methods returning a value (`isExclusiveNFC()`, `backgroundSessionReady()`) run synchronously
+  native queue. Methods returning a value (`isExclusiveNFC()`, `backgroundSessionReady()`,
+  `isBackgroundHandlerEnabled()`) run synchronously
   on the JS thread, so they are not ordered with the asynchronous ones.
 - On Android, JS timers (`setTimeout`) are paused while the app is not resumed, unless a headless JS task
   is running. Promises and native events still work. Don't make anything that runs in background depend

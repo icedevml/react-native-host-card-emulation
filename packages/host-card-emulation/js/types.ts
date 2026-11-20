@@ -29,7 +29,7 @@ export interface HCECapabilities {
 
 export interface CommandAPDU {
   /**
-   * Identifier of the C-APDU, unique within the app process.
+   * Identifier of the C-APDU, unique while the JS bundle is running (iOS starts over after a reload).
    */
   readonly id: number;
   /**

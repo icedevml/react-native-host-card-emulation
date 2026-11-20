@@ -186,8 +186,8 @@ const caps = await HCE.getCapabilities();
            return new Uint8Array([0x0A, 0x90, 0x00]);
        },
        // every handler receives the session as its last argument
-       onReaderDetected: (s) => s.setAlertMessage('Reader detected'),  // only for iOS, no-op on Android
-       onReaderLost: (s) => s.setAlertMessage('Lost reader'),          // only for iOS, no-op on Android
+       onReaderDetected: (s) => s.setAlertMessage('Reader detected'),  // setAlertMessage(): iOS only, no-op on Android
+       onReaderLost: (s) => s.setAlertMessage('Lost reader'),
        onInvalidated: (reason) => console.log('session closed', reason),
        onError: (error) => console.warn('HCE handler error', error),
    });
@@ -304,9 +304,11 @@ This function will acquire an exclusive NFC access for 15 seconds. No system ser
 While both session and exclusive NFC access are active, `onReaderDetected` is called even when the emulation is not started at the time (without any explicit UI being displayed by the system). You can then call `session.startEmulation()` from within that handler to initiate the interaction automatically, without needing the user to click anything beforehand.
 
 This function will throw an exception if:
-* the presentment intent assertion was already acquired and is still active;
+* the presentment intent assertion was already acquired and is still active (`err_already_exists`);
 * you are in the cooldown period where you are not allowed to acquire the presentment intent assertion (cooldown is 15 seconds after the previous assertion has ended - expired, released with `HCE.releaseExclusiveNFC()` or revoked when the app went to background), it rejects with `err_acquire_presentment` then;
-* the feature is not supported or the device is not eligible for whatever reason (rejects with `err_platform_unsupported` on Android).
+* the feature is not supported or the device is not eligible for whatever reason (`err_nfc_reader_not_available`,
+  `err_card_session_unsupported` or `err_card_session_not_eligible`; `err_platform_unsupported` on Android and on iOS
+  older than 17.4).
 
 You can check if you are holding an exclusive NFC access by calling `HCE.isExclusiveNFC()`. Whenever you don't need the exclusive NFC access anymore, call `HCE.releaseExclusiveNFC()`.
 
