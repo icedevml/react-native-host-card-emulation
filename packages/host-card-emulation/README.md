@@ -505,7 +505,7 @@ try {
 | `err_session_invalidated` | The session was invalidated while it was being started. |
 | `err_aborted` | `beginSession()` was aborted through the `AbortSignal`. |
 | `err_start_emulation` | iOS: The OS has refused to start the emulation. |
-| `err_apdu_respond` | iOS, passed to `onError`: The OS has failed to send the R-APDU to the reader. |
+| `err_apdu_respond` | iOS, passed to `onError`: The OS has failed to send the R-APDU to the reader. Not reported when the reader was lost or the session was closed in the meantime. |
 | `err_nfc_reader_not_available`, `err_card_session_unsupported`, `err_card_session_not_eligible`, `err_create_card_session` | iOS: Preflight checks or session creation failed. |
 | `err_already_exists`, `err_acquire_presentment` | iOS: `acquireExclusiveNFC()` failed. |
 
